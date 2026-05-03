@@ -64,9 +64,15 @@ class Pipeline:
         results = self.downloader.download_playlist(url)
 
         for video_path, meta in results:
-            print(f"\n--- {meta.get('title', video_path.stem)} ---")
+            folder = video_path.parent
+            title = meta.get('title', video_path.stem)
+            print(f"\n--- {title} ---")
+
+            if (folder / "summary.md").exists() and get_state(folder) == "done":
+                print(f"  已完成，跳过")
+                continue
+
             try:
-                folder = video_path.parent
                 transcript_path = self.transcriber.transcribe(video_path, folder)
                 transcript_md = transcript_path.read_text(encoding="utf-8")
                 save_formats(transcript_md, folder / "video", formats)
@@ -74,7 +80,7 @@ class Pipeline:
                 summary_text = self.summarizer.summarize(transcript_md, meta, style=style)
                 set_state(folder, "done")
                 save_formats(summary_text, folder / "summary", formats)
-                print(f"  完成: {meta.get('title', '')}")
+                print(f"  完成: {title}")
             except Exception as e:
                 print(f"  [FAIL] {e}")
                 continue

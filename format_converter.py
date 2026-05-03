@@ -38,8 +38,12 @@ def md_to_html(text):
         return f"<pre><code>{m.group(1)}</code></pre>"
     text = re.sub(r"```(?:\w+)?\n?(.+?)```", _code_block, text, flags=re.DOTALL)
 
-    # 行内代码 `
-    text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
+    # 行内代码 ` → 先占位，避免后续正则误匹配 code 标签内的内容
+    code_spans = []
+    def _store_code(m):
+        code_spans.append(m.group(1))
+        return f"\x00C{len(code_spans)-1}\x00"
+    text = re.sub(r"`(.+?)`", _store_code, text)
 
     # 标题
     text = re.sub(r"^####\s+(.+)$", r"<h4>\1</h4>", text, flags=re.MULTILINE)
@@ -67,6 +71,10 @@ def md_to_html(text):
     text = re.sub(r"^[\s]*[-*+]\s+(.+)$", r"<li>\1</li>", text, flags=re.MULTILINE)
     # 有序列表
     text = re.sub(r"^[\s]*\d+\.\s+(.+)$", r"<li class=\"ol\">\1</li>", text, flags=re.MULTILINE)
+
+    # 还原行内代码占位
+    for i, code in enumerate(code_spans):
+        text = text.replace(f"\x00C{i}\x00", f"<code>{code}</code>")
 
     # 包裹段落
     paragraphs = text.split("\n\n")

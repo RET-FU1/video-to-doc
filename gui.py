@@ -197,6 +197,9 @@ class App:
         return None
 
     def _log(self, text):
+        if threading.current_thread() is not threading.main_thread():
+            self.root.after(0, lambda t=text: self._log(t))
+            return
         tag = self._log_tag(text)
 
         self.log.configure(state="normal")
@@ -208,6 +211,9 @@ class App:
         self.log.configure(state="disabled")
 
     def _set_status(self, text):
+        if threading.current_thread() is not threading.main_thread():
+            self.root.after(0, lambda t=text: self._set_status(t))
+            return
         self.status_label.configure(text=text)
 
     # ------------------------------------------------------------------
@@ -222,7 +228,7 @@ class App:
             return
 
         self.start_btn.pack_forget()
-        self.stop_btn.pack(side="left", padx=(0, 8), before=self.start_btn)
+        self.stop_btn.pack(side="left", padx=(0, 8))
         self.progress.pack(fill="x", pady=(0, 8))
         self.progress.start()
         self._log(f"共 {len(urls)} 个任务，开始处理...")
@@ -253,7 +259,7 @@ class App:
                 self._set_status(f"处理中 ({i+1}/{len(urls)})")
                 self._log(f"\n[{i+1}/{len(urls)}] {url}")
 
-                cmd = [python, str(PROJECT_ROOT / "main.py"), url]
+                cmd = [python, "-u", str(PROJECT_ROOT / "main.py"), url]
                 if self.playlist_var.get():
                     cmd.append("--playlist")
                 cmd.extend(["--summary-style", self.style_var.get()])

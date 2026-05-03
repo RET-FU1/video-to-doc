@@ -65,7 +65,8 @@ class Downloader:
         if cookies and os.path.exists(cookies):
             cmd += ["--cookies", cookies]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        timeout = self.dl_config.get("timeout", 7200)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode != 0:
             raise RuntimeError(f"下载失败: {result.stderr.strip() or result.stdout.strip()}")
 
@@ -177,8 +178,8 @@ class Downloader:
                 return json.loads(result.stdout.strip())
         except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
             print(f"  [WARN] 获取元信息失败: {e}")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  [WARN] 获取元信息失败 ({type(e).__name__}): {e}")
         return {"title": url.split("/")[-1]}
 
     def _find_video(self, folder):

@@ -77,13 +77,13 @@ class Transcriber:
             model = WhisperModel(model_path, device=device, compute_type=compute,
                                  download_root=str(self._model_cache))
             print(f"  模型已加载 (device={device}, compute={compute})")
+            self._model = model
         except Exception:
             print(f"  GPU 不可用，回退到 CPU")
             model = WhisperModel(model_path, device="cpu", compute_type="int8",
                                  download_root=str(self._model_cache))
             print(f"  模型已加载 (device=cpu, compute=int8)")
 
-        self._model = model
         return model
 
     def transcribe(self, video_path, output_folder):
@@ -123,11 +123,11 @@ class Transcriber:
                 language = None
 
             def _do_transcribe(m):
-                segs, info = m.transcribe(str(audio_path), language=language)
-                return [seg.text.strip() for seg in segs]
+                return m.transcribe(str(audio_path), language=language,
+                                    word_timestamps=True)
 
             try:
-                lines = _do_transcribe(model)
+                segs, info = _do_transcribe(model)
             except Exception as gpu_err:
                 if "cublas" in str(gpu_err).lower() or "cuda" in str(gpu_err).lower():
                     print(f"  GPU 转写失败，回退到 CPU ({gpu_err})")
@@ -139,13 +139,15 @@ class Transcriber:
                         self._resolve_model_path(), device="cpu", compute_type="int8",
                         download_root=str(self._model_cache))
                     self._model = model
-                    lines = _do_transcribe(model)
+                    segs, info = _do_transcribe(model)
                 else:
                     raise
 
+            transcript_text = self._format_transcript(segs, info)
+
             with open(transcript_path, "w", encoding="utf-8") as f:
                 f.write(f"# {video_stem}\n\n")
-                f.write("\n\n".join(lines))
+                f.write(transcript_text)
 
             print(f"  已保存: {transcript_path.name}")
             set_state(output_folder, "transcribed")
@@ -154,6 +156,48 @@ class Transcriber:
         finally:
             if audio_path.exists():
                 audio_path.unlink()
+
+    # ---- 转写文本格式化 ----
+
+    @staticmethod
+    def _format_transcript(segments, info):
+        """根据词级时间戳插入标点，生成自然段落文本"""
+        all_words = []
+        for seg in segments:
+            if seg.words:
+                all_words.extend(seg.words)
+
+        if not all_words:
+            return "\n\n".join(seg.text.strip() for seg in segments)
+
+        is_zh = (info.language or "").startswith("zh")
+        period = "。" if is_zh else "."
+        comma = "，" if is_zh else ","
+        space = "" if is_zh else " "
+
+        result = []
+        line = ""
+
+        for i, w in enumerate(all_words):
+            line += w.word if (is_zh or not line) else space + w.word
+
+            if i == len(all_words) - 1:
+                result.append(line + period)
+                break
+
+            gap = all_words[i + 1].start - w.end
+
+            if gap > 1.2:
+                result.append(line + period)
+                result.append("")
+                line = ""
+            elif gap > 0.4:
+                result.append(line + period)
+                line = ""
+            elif gap > 0.15:
+                line += comma
+
+        return "\n".join(result)
 
     # ---- whisperX 说话人分离路径 ----
 

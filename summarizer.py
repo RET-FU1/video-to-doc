@@ -30,7 +30,7 @@ class OpenAICompatSummarizer(BaseSummarizer):
 
         self.config = config.get("summarizer", {})
         self.model = self.config.get("model", "deepseek-chat")
-        self.max_chunk = self.config.get("max_chunk_tokens", 80000)
+        self.max_chunk = self.config.get("max_chunk_chars", 80000)
         self.max_tokens = self.config.get("max_tokens", 4096)
 
         base_url = self.config.get("base_url", "https://api.deepseek.com")
