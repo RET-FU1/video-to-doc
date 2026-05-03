@@ -5,26 +5,20 @@
 # 输出根目录（相对路径相对于项目根目录）
 output_dir: ./output
 
-# 是否保留中间文件
-keep_video: false
-keep_audio: false
-
 # 转写设置
 whisper:
-  model: large-v3-turbo        # tiny / base / small / medium / large-v3 / large-v3-turbo
   language: zh                  # 转写语言，auto=自动检测
   device: cuda                  # cuda / cpu
   compute_type: float16         # float16（GPU）/ int8（CPU）
 
 # 总结设置
 summarizer:
-  provider: openai              # openai（OpenAI兼容接口）/ anthropic（Anthropic兼容接口）/ ollama
+  provider: openai              # openai / ollama
   base_url: https://api.deepseek.com  # API 地址（以下为常用国内服务商）
-                                  # DeepSeek OpenAI:     https://api.deepseek.com
-                                  # DeepSeek Anthropic:  https://api.deepseek.com/anthropic
-                                  # 智谱:                https://open.bigmodel.cn/api/paas/v4
-                                  # 通义千问:            https://dashscope.aliyuncs.com/compatible-mode/v1
-                                  # 月之暗面:            https://api.moonshot.cn/v1
+                                  # DeepSeek:     https://api.deepseek.com
+                                  # 智谱:         https://open.bigmodel.cn/api/paas/v4
+                                  # 通义千问:     https://dashscope.aliyuncs.com/compatible-mode/v1
+                                  # 月之暗面:     https://api.moonshot.cn/v1
   model: deepseek-v4-pro         # DeepSeek: deepseek-v4-pro / deepseek-v4-flash
                                   # 智谱: glm-4-flash / 通义: qwen-turbo / 月之暗面: moonshot-v1-8k
   max_chunk_tokens: 80000        # 分段阈值，超过此长度自动分段总结
@@ -35,13 +29,14 @@ summarizer:
     # - txt
     # - html
 
+# 说话人分离（可选，需安装 whisperx）
+diarization:
+  enabled: false                 # true 启用
+  hf_token: ""                   # HuggingFace Token，也支持 .env 中 HF_TOKEN
+  min_speakers: 2                # 预估最少说话人数
+  max_speakers: 5                # 预估最多说话人数
+
 # 下载设置
 downloader:
   format: bestvideo[height<=1080]+bestaudio/best  # 视频质量
   cookies_file: ""              # Cookie 文件路径（如需下载会员视频）
-  subtitle_fallback: true       # 如果可用字幕优先使用字幕而非语音转写
-
-# 重试设置
-retry:
-  max_attempts: 3
-  sleep_seconds: 10

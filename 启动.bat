@@ -7,4 +7,4 @@ if not exist "venv\Scripts\python.exe" (
     exit /b 1
 )
 
-start "" "venv\Scripts\pythonw.exe" "gui.py"
+start "" "venv\Scripts\python.exe" gui.py

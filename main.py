@@ -33,12 +33,12 @@ def main():
         epilog="""
 示例:
   python main.py https://www.bilibili.com/video/BV1xx411x7xx
+  python main.py C:/videos/myvideo.mp4
   python main.py https://www.youtube.com/playlist?list=xxx --playlist
   python main.py https://example.com/video --summary-style knowledge_points
-  python main.py https://example.com/video --skip-download
         """,
     )
-    parser.add_argument("url", help="视频或播放列表 URL")
+    parser.add_argument("url", help="视频 URL 或本地文件路径")
     parser.add_argument("--playlist", action="store_true", help="以播放列表模式下载")
     parser.add_argument("--skip-download", action="store_true", help="跳过下载（已有视频文件）")
     parser.add_argument("--summary-style", default="auto",
@@ -51,8 +51,11 @@ def main():
 
     config = load_config()
 
-    if args.summary_style:
-        config.setdefault("summarizer", {})["summary_style"] = args.summary_style
+    if "output_dir" not in config:
+        print("[ERROR] config.yaml 缺少必填项 output_dir，请检查配置文件")
+        sys.exit(1)
+
+    config.setdefault("summarizer", {})["summary_style"] = args.summary_style
     config.setdefault("summarizer", {})["output_formats"] = [
         f.strip() for f in args.output_formats.split(",") if f.strip()
     ]

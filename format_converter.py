@@ -66,31 +66,39 @@ def md_to_html(text):
     # 无序列表
     text = re.sub(r"^[\s]*[-*+]\s+(.+)$", r"<li>\1</li>", text, flags=re.MULTILINE)
     # 有序列表
-    text = re.sub(r"^[\s]*\d+\.\s+(.+)$", r"<li>\1</li>", text, flags=re.MULTILINE)
+    text = re.sub(r"^[\s]*\d+\.\s+(.+)$", r"<li class=\"ol\">\1</li>", text, flags=re.MULTILINE)
 
     # 包裹段落
     paragraphs = text.split("\n\n")
     result = []
-    in_list = False
+    in_list = None  # None / "ul" / "ol"
     for p in paragraphs:
         p = p.strip()
         if not p:
             continue
-        if re.match(r"^<li>", p):
-            if not in_list:
-                result.append("<ul>")
-                in_list = True
+
+        m_ol = re.match(r'^<li class="ol">', p)
+        m_li = re.match(r"^<li>", p)
+        if m_ol or m_li:
+            list_type = "ol" if m_ol else "ul"
+            if m_ol:
+                p = re.sub(r'^<li class="ol">', "<li>", p)
+            if in_list != list_type:
+                if in_list:
+                    result.append(f"</{in_list}>")
+                result.append(f"<{list_type}>")
+                in_list = list_type
             result.append(p)
         else:
             if in_list:
-                result.append("</ul>")
-                in_list = False
+                result.append(f"</{in_list}>")
+                in_list = None
             if re.match(r"^<h[1-4]>|<hr>|<pre>|<blockquote>", p):
                 result.append(p)
             else:
                 result.append(f"<p>{p}</p>")
     if in_list:
-        result.append("</ul>")
+        result.append(f"</{in_list}>")
 
     html = "\n".join(result)
     return f"""<!DOCTYPE html>

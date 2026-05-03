@@ -1,40 +1,47 @@
 """
-音频转文字模块 — faster-whisper
+音频转文字模块 — faster-whisper + 可选 whisperX 说话人分离
 从视频提取音频后转写为 Markdown 文档
 """
 import os
-import re
 import subprocess
-import shutil
-import sys
 from pathlib import Path
+from utils import sanitize_filename, find_ffmpeg, set_state, PROJECT_ROOT
 
-# GPU 加速：加载 CUDA DLL
-# os.add_dll_directory 方式
-for _d in sys.path:
-    _nvidia = os.path.join(_d, "nvidia")
-    if os.path.isdir(_nvidia):
-        for _sub in os.listdir(_nvidia):
-            _bin = os.path.join(_nvidia, _sub, "bin")
-            if os.path.isdir(_bin):
-                try:
-                    os.add_dll_directory(_bin)
-                except Exception:
-                    pass
-    _ctranslate = os.path.join(_d, "ctranslate2")
-    if os.path.isdir(_ctranslate):
+_cuda_inited = False
+
+
+def _init_cuda():
+    """懒加载 CUDA DLL（首次调用 _get_model 时执行）"""
+    global _cuda_inited
+    if _cuda_inited:
+        return
+    _cuda_inited = True
+
+    import sys
+
+    for _d in sys.path:
+        _nvidia = os.path.join(_d, "nvidia")
+        if os.path.isdir(_nvidia):
+            for _sub in os.listdir(_nvidia):
+                _bin = os.path.join(_nvidia, _sub, "bin")
+                if os.path.isdir(_bin):
+                    try:
+                        os.add_dll_directory(_bin)
+                    except Exception:
+                        pass
+        _ctranslate = os.path.join(_d, "ctranslate2")
+        if os.path.isdir(_ctranslate):
+            try:
+                os.add_dll_directory(_ctranslate)
+            except Exception:
+                pass
+
+    import ctypes
+    for dll in ("cublas64_12.dll", "cudart64_12.dll"):
         try:
-            os.add_dll_directory(_ctranslate)
-        except Exception:
+            ctypes.cdll.LoadLibrary(dll)
+        except OSError:
             pass
-
-# 显式预加载 cublas，确保 ctranslate2 能找到
-try:
-    import ctypes as _ctypes
-    _ctypes.cdll.LoadLibrary("cublas64_12.dll")
-    _ctypes.cdll.LoadLibrary("cudart64_12.dll")
-except OSError:
-    pass
 
 
 class Transcriber:
@@ -42,14 +49,9 @@ class Transcriber:
         self.config = config
         self.output_root = Path(output_root)
         self.whisper_config = config.get("whisper", {})
+        self.diar_config = config.get("diarization", {})
         self._model = None
-        self._model_cache = Path(__file__).parent / "models"
-
-    def _find_ffmpeg(self):
-        ff = shutil.which("ffmpeg")
-        if ff:
-            return ff
-        raise FileNotFoundError("未找到 ffmpeg，请先安装 ffmpeg")
+        self._model_cache = PROJECT_ROOT / "models"
 
     def _resolve_model_path(self):
         model_dirs = list(self._model_cache.glob("pengzhendong/faster-whisper-large-v3-turbo"))
@@ -62,6 +64,8 @@ class Transcriber:
     def _get_model(self):
         if self._model:
             return self._model
+
+        _init_cuda()
 
         from faster_whisper import WhisperModel
 
@@ -88,23 +92,31 @@ class Transcriber:
         output_folder.mkdir(parents=True, exist_ok=True)
 
         video_stem = Path(video_path).stem
-        safe_name = re.sub(r'[<>:"/\\|?*]', "-", video_stem)
+        safe_name = sanitize_filename(video_stem)
         transcript_path = output_folder / f"{safe_name}.md"
-        audio_path = output_folder / f"_tmp_audio_{os.getpid()}.mp3"
 
-        state_file = output_folder / ".pipeline_state"
         if transcript_path.exists():
             print(f"  已转写: {safe_name}")
-            self._set_state(state_file, "transcribed")
+            set_state(output_folder, "transcribed")
             return transcript_path
 
         print(f"  转写中: {safe_name}")
 
-        # 提取音频
-        self._extract_audio(video_path, audio_path)
+        # 尝试说话人分离（如已启用）
+        if self.diar_config.get("enabled", False):
+            try:
+                return self._transcribe_with_diarization(
+                    video_path, output_folder, safe_name
+                )
+            except Exception as e:
+                print(f"  [WARN] 说话人分离失败，回退到基础转写: {e}")
 
-        # 转写
+        # 基础转写路径（faster-whisper）
+        audio_path = output_folder / f"_tmp_audio_{os.getpid()}.mp3"
+
         try:
+            self._extract_audio(video_path, audio_path)
+
             model = self._get_model()
             language = self.whisper_config.get("language", "zh")
             if language == "auto":
@@ -119,8 +131,10 @@ class Transcriber:
             except Exception as gpu_err:
                 if "cublas" in str(gpu_err).lower() or "cuda" in str(gpu_err).lower():
                     print(f"  GPU 转写失败，回退到 CPU ({gpu_err})")
+                    import gc
                     from faster_whisper import WhisperModel
                     self._model = None
+                    gc.collect()
                     model = WhisperModel(
                         self._resolve_model_path(), device="cpu", compute_type="int8",
                         download_root=str(self._model_cache))
@@ -129,26 +143,149 @@ class Transcriber:
                 else:
                     raise
 
-            # 写入 Markdown
             with open(transcript_path, "w", encoding="utf-8") as f:
                 f.write(f"# {video_stem}\n\n")
                 f.write("\n\n".join(lines))
 
             print(f"  已保存: {transcript_path.name}")
-            self._set_state(state_file, "transcribed")
+            set_state(output_folder, "transcribed")
             return transcript_path
 
         finally:
             if audio_path.exists():
                 audio_path.unlink()
 
+    # ---- whisperX 说话人分离路径 ----
+
+    def _transcribe_with_diarization(self, video_path, output_folder, safe_name):
+        """whisperX: 转写 + 时间戳对齐 + 说话人分离"""
+        import gc
+
+        # 检查 whisperX 是否安装
+        try:
+            import whisperx
+        except ImportError:
+            print("  [WARN] whisperX 未安装。安装命令: pip install whisperx")
+            print("  [WARN] Python 3.12+ 可能有依赖冲突，建议 Python 3.10-3.11")
+            raise
+
+        # 检查 HF Token
+        hf_token = (self.diar_config.get("hf_token") or
+                     os.environ.get("HF_TOKEN") or "")
+        if not hf_token:
+            print("  [WARN] 未设置 HF_TOKEN，说话人分离需要 HuggingFace Token")
+            print("  [WARN] 在 .env 中添加 HF_TOKEN=hf_xxx")
+            print("  [WARN] 从 https://huggingface.co/settings/tokens 获取 Read token")
+            raise ValueError("HF_TOKEN not configured")
+
+        audio_path = output_folder / f"_tmp_audio_{os.getpid()}.mp3"
+
+        try:
+            self._extract_audio(video_path, audio_path)
+
+            device = self.whisper_config.get("device", "cuda")
+            compute = self.whisper_config.get("compute_type", "float16")
+            language = self.whisper_config.get("language", "zh")
+            if language == "auto":
+                language = None
+
+            # 1. 加载音频
+            audio = whisperx.load_audio(str(audio_path))
+
+            # 2. 转写
+            print("  转写中 (whisperX)...")
+            model_path = self._resolve_model_path()
+            model = whisperx.load_model(
+                model_path, device=device, compute_type=compute,
+                download_root=str(self._model_cache),
+                language=language,
+            )
+            result = model.transcribe(audio, batch_size=16)
+            del model
+            gc.collect()
+
+            # 3. 词级时间戳对齐
+            print("  对齐时间戳...")
+            model_a, metadata = whisperx.load_align_model(
+                language_code=result["language"], device=device
+            )
+            result = whisperx.align(result["segments"], model_a, metadata, audio, device)
+            del model_a
+            gc.collect()
+
+            # 4. 说话人分离
+            print("  说话人分离...")
+            diarize_model = whisperx.DiarizationPipeline(
+                use_auth_token=hf_token, device=device
+            )
+            diarize_kwargs = {}
+            if self.diar_config.get("min_speakers"):
+                diarize_kwargs["min_speakers"] = self.diar_config["min_speakers"]
+            if self.diar_config.get("max_speakers"):
+                diarize_kwargs["max_speakers"] = self.diar_config["max_speakers"]
+            diarize_segments = diarize_model(audio, **diarize_kwargs)
+
+            # 5. 分配说话人
+            result = whisperx.assign_word_speakers(diarize_segments, result)
+
+            return self._format_diarized_output(result, output_folder, safe_name)
+
+        finally:
+            if audio_path.exists():
+                audio_path.unlink()
+
+    def _format_diarized_output(self, result, output_folder, safe_name):
+        """将 whisperX 结果格式化为带说话人标签的 Markdown"""
+        transcript_path = output_folder / f"{safe_name}.md"
+
+        # 合并同一说话人的连续段落
+        merged = []
+        for seg in result.get("segments", []):
+            speaker = seg.get("speaker", "UNKNOWN")
+            text = seg.get("text", "").strip()
+            if not text:
+                continue
+            if merged and merged[-1]["speaker"] == speaker:
+                merged[-1]["end"] = seg.get("end", 0)
+                merged[-1]["text"] += " " + text
+            else:
+                merged.append({
+                    "speaker": speaker,
+                    "start": seg.get("start", 0),
+                    "end": seg.get("end", 0),
+                    "text": text,
+                })
+
+        lines = [f"# {safe_name}", ""]
+        for block in merged:
+            header = (
+                f"## {block['speaker']} "
+                f"({self._format_time(block['start'])} - "
+                f"{self._format_time(block['end'])})"
+            )
+            lines.append(header)
+            lines.append("")
+            lines.append(block["text"])
+            lines.append("")
+
+        content = "\n".join(lines)
+        transcript_path.write_text(content, encoding="utf-8")
+        print(f"  已保存（含说话人标签）: {transcript_path.name}")
+        set_state(output_folder, "transcribed")
+        return transcript_path
+
+    @staticmethod
+    def _format_time(seconds):
+        """浮点秒 → HH:MM:SS.mmm"""
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = seconds % 60
+        return f"{h:02d}:{m:02d}:{s:06.3f}"
+
+    # ---- 音频提取 ----
+
     def _extract_audio(self, video_path, audio_path):
-        ffmpeg = self._find_ffmpeg()
+        ffmpeg = find_ffmpeg()
         cmd = [ffmpeg, "-i", str(video_path), "-vn", "-acodec", "mp3",
                "-q:a", "2", "-y", str(audio_path)]
         subprocess.run(cmd, capture_output=True, check=True)
-
-    @staticmethod
-    def _set_state(state_file, state):
-        with open(state_file, "w") as f:
-            f.write(state)

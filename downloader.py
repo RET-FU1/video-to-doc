@@ -1,14 +1,13 @@
 """
-视频下载模块 — yt-dlp 封装
-支持单视频、播放列表。自动提取元信息。
+视频下载模块 — yt-dlp 封装 + 本地视频支持
+支持单视频、播放列表、本地视频文件。自动提取元信息。
 """
 import json
 import os
-import re
 import shutil
 import subprocess
-import sys
 from pathlib import Path
+from utils import sanitize_filename, find_ffmpeg, find_venv_executable, get_state, set_state, is_done
 
 
 class Downloader:
@@ -19,54 +18,40 @@ class Downloader:
         self._ffmpeg = None
         self._ytdlp = None
 
-    def _find_ffmpeg(self):
-        if self._ffmpeg:
-            return self._ffmpeg
-        ff = shutil.which("ffmpeg")
-        if ff:
-            self._ffmpeg = ff
-            return ff
-        raise FileNotFoundError("未找到 ffmpeg，请先安装 ffmpeg")
+    def _get_ffmpeg(self):
+        if not self._ffmpeg:
+            self._ffmpeg = find_ffmpeg()
+        return self._ffmpeg
 
-    def _find_ytdlp(self):
-        """跨平台查找 yt-dlp"""
-        if self._ytdlp:
-            return self._ytdlp
-        # 先在项目 venv 中查找
-        if sys.platform == "win32":
-            venv_ytdlp = Path(__file__).parent / "venv" / "Scripts" / "yt-dlp.exe"
-        else:
-            venv_ytdlp = Path(__file__).parent / "venv" / "bin" / "yt-dlp"
-        if venv_ytdlp.exists():
-            self._ytdlp = str(venv_ytdlp)
-            return self._ytdlp
-        # 再在 PATH 中查找
-        ff = shutil.which("yt-dlp")
-        if ff:
-            self._ytdlp = ff
-            return ff
-        raise FileNotFoundError("未找到 yt-dlp，请先运行 python setup.py")
+    def _get_ytdlp(self):
+        if not self._ytdlp:
+            self._ytdlp = find_venv_executable("yt-dlp")
+        return self._ytdlp
 
-    def _sanitize(self, name):
-        return re.sub(r'[<>:"/\\|?*]', "-", name)
+    @staticmethod
+    def _is_url(path):
+        return path.startswith(("http://", "https://"))
 
     def download(self, url, output_subdir=None):
-        """下载视频，返回 (video_path, meta)"""
+        """下载视频或导入本地文件，返回 (video_path, meta)"""
+        # 本地文件路径
+        if not self._is_url(url):
+            return self._import_local(url, output_subdir)
+
         meta = self._fetch_meta(url)
-        title = self._sanitize(meta.get("title", "untitled"))
+        title = sanitize_filename(meta.get("title", "untitled"))
         folder = self.output_root / (output_subdir or title)
         folder.mkdir(parents=True, exist_ok=True)
 
-        state_file = folder / ".pipeline_state"
         video_path = self._find_video(folder)
-        if video_path and self._is_done(state_file):
+        if video_path and is_done(folder):
             print(f"  已下载: {title}")
             return video_path, meta
 
         print(f"  下载中: {title}")
 
         cmd = [
-            self._find_ytdlp(),
+            self._get_ytdlp(),
             url,
             "-P", str(folder),
             "-o", "video.%(ext)s",
@@ -82,27 +67,48 @@ class Downloader:
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            # yt-dlp sometimes prints info to stderr even on success
-            if "ERROR" in result.stderr or "Error" in result.stderr:
-                raise RuntimeError(f"下载失败: {result.stderr}")
+            raise RuntimeError(f"下载失败: {result.stderr.strip() or result.stdout.strip()}")
 
-        # 查找下载的视频文件
         video_path = self._find_video(folder)
         if not video_path:
             raise FileNotFoundError(f"下载后未找到视频文件于 {folder}")
 
-        self._set_state(state_file, "downloaded")
+        set_state(folder, "downloaded")
         return video_path, meta
+
+    def _import_local(self, path, output_subdir=None):
+        """导入本地视频文件到输出目录，返回 (video_path, meta)"""
+        local = Path(path).resolve()
+        if not local.exists():
+            raise FileNotFoundError(f"本地文件不存在: {path}")
+        if not local.is_file():
+            raise ValueError(f"路径不是文件: {path}")
+
+        title = sanitize_filename(local.stem)
+        folder = self.output_root / (output_subdir or title)
+        folder.mkdir(parents=True, exist_ok=True)
+
+        ext = local.suffix or ".mp4"
+        dest = folder / f"video{ext}"
+
+        # 已导入过
+        if dest.exists() and is_done(folder):
+            print(f"  已导入: {title}")
+            return dest, {"title": title, "uploader": "本地文件"}
+
+        print(f"  导入本地文件: {local.name}")
+        shutil.copy2(str(local), str(dest))
+        set_state(folder, "downloaded")
+        return dest, {"title": title, "uploader": "本地文件"}
 
     def download_playlist(self, url):
         """下载播放列表所有视频，返回 [(video_path, meta), ...]"""
         print("  获取播放列表信息...")
         meta = self._fetch_meta(url)
-        playlist_title = self._sanitize(meta.get("title", meta.get("playlist", "playlist")))
+        playlist_title = sanitize_filename(meta.get("title", meta.get("playlist", "playlist")))
 
-        # 获取播放列表条目
         result = subprocess.run(
-            [self._find_ytdlp(), "--flat-playlist", "--dump-json", url],
+            [self._get_ytdlp(), "--flat-playlist", "--dump-json", url],
             capture_output=True, text=True
         )
 
@@ -117,14 +123,16 @@ class Downloader:
                 continue
 
         if not entries:
-            # 回退: 尝试用 yt-dlp 直接下载播放列表
             print("  使用 yt-dlp 原生播放列表支持...")
             return self._download_playlist_direct(url, playlist_title)
 
         print(f"  共 {len(entries)} 个视频")
         results = []
         for i, entry in enumerate(entries):
-            video_url = entry.get("url") or entry.get("webpage_url") or f"https://youtube.com/watch?v={entry['id']}"
+            video_url = entry.get("url") or entry.get("webpage_url")
+            if not video_url:
+                print(f"  [SKIP] 无法获取视频 URL: {entry.get('title', entry.get('id', 'unknown'))}")
+                continue
             print(f"\n  [{i+1}/{len(entries)}]")
             try:
                 video_path, video_meta = self.download(video_url, output_subdir=playlist_title)
@@ -141,7 +149,7 @@ class Downloader:
         folder.mkdir(parents=True, exist_ok=True)
 
         cmd = [
-            self._find_ytdlp(), url,
+            self._get_ytdlp(), url,
             "-o", str(folder / "%(playlist_index)s-%(title)s.%(ext)s"),
             "--format", self.dl_config.get("format", "bestvideo[height<=1080]+bestaudio/best"),
             "--merge-output-format", "mp4",
@@ -153,7 +161,6 @@ class Downloader:
 
         subprocess.run(cmd, check=True, cwd=str(folder))
 
-        # 收集结果
         results = []
         for f in sorted(folder.glob("*.mp4")):
             results.append((f, {"title": f.stem}))
@@ -163,11 +170,13 @@ class Downloader:
         """获取视频元信息"""
         try:
             result = subprocess.run(
-                [self._find_ytdlp(), "--dump-json", "--no-playlist", url],
+                [self._get_ytdlp(), "--dump-json", "--no-playlist", url],
                 capture_output=True, text=True, timeout=30
             )
             if result.returncode == 0 and result.stdout.strip():
                 return json.loads(result.stdout.strip())
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
+            print(f"  [WARN] 获取元信息失败: {e}")
         except Exception:
             pass
         return {"title": url.split("/")[-1]}
@@ -179,14 +188,3 @@ class Downloader:
             if videos:
                 return videos[0]
         return None
-
-    @staticmethod
-    def _set_state(state_file, state):
-        with open(state_file, "w") as f:
-            f.write(state)
-
-    @staticmethod
-    def _is_done(state_file):
-        if not state_file.exists():
-            return False
-        return state_file.read_text().strip() in ("downloaded", "transcribed", "summarized", "done")

@@ -5,121 +5,253 @@ import os
 import sys
 import subprocess
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+from utils import find_venv_executable
+
 PROJECT_ROOT = Path(__file__).parent
 
+# 配色
+C = {
+    "bg":         "#f0f2f5",
+    "card":       "#ffffff",
+    "primary":    "#2563eb",
+    "primary2":   "#1d4ed8",
+    "text":       "#1a1a2e",
+    "muted":      "#6b7280",
+    "border":     "#e5e7eb",
+    "log_bg":     "#1e1e2e",
+    "log_fg":     "#c9d1d9",
+    "green":      "#10b981",
+    "red":        "#ef4444",
+    "yellow":     "#eab308",
+    "blue":       "#60a5fa",
+}
 
-def get_python():
-    if sys.platform == "win32":
-        return str(PROJECT_ROOT / "venv" / "Scripts" / "python.exe")
-    return str(PROJECT_ROOT / "venv" / "bin" / "python")
+F = {
+    "header":  ("Segoe UI", 18, "bold"),
+    "section": ("Segoe UI", 11, "bold"),
+    "body":    ("Segoe UI", 10),
+    "small":   ("Segoe UI", 9),
+    "mono":    ("Consolas", 10),
+}
 
 
 class App:
     def __init__(self, root):
         self.root = root
         self.root.title("Video-to-Doc")
-        self.root.geometry("600x400")
-        self.root.resizable(True, True)
+        self.root.geometry("680x540")
+        self.root.minsize(500, 400)
+        self.root.configure(bg=C["bg"])
+        self._process = None
+        self._build_ui()
 
-        # 主框架
-        main = ttk.Frame(root, padding=16)
-        main.pack(fill="both", expand=True)
+    # ------------------------------------------------------------------
+    # 布局
+    # ------------------------------------------------------------------
 
-        # 标题
-        title = ttk.Label(main, text="Video-to-Doc", font=("", 16, "bold"))
-        title.pack(pady=(0, 16))
+    def _build_ui(self):
+        # 顶部标题栏
+        header = tk.Frame(self.root, bg=C["primary"], height=52)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        tk.Label(header, text="Video-to-Doc", font=F["header"],
+                 fg="white", bg=C["primary"]).pack(side="left", padx=20, pady=10)
+        tk.Label(header, text="下载 · 转写 · AI 总结", font=F["small"],
+                 fg="#93c5fd", bg=C["primary"]).pack(side="left", pady=14)
 
-        # URL 输入
-        url_frame = ttk.Frame(main)
-        url_frame.pack(fill="x", pady=(0, 8))
-        ttk.Label(url_frame, text="视频链接：").pack(anchor="w")
-        self.url_text = tk.Text(url_frame, height=4, wrap="word",
-                                font=("", 9))
-        self.url_text.pack(fill="x", pady=(4, 0))
-        ttk.Label(url_frame, text="每行一个链接，支持同时粘贴多个",
-                  foreground="gray").pack(anchor="w")
+        # 主内容区
+        main = tk.Frame(self.root, bg=C["bg"])
+        main.pack(fill="both", expand=True, padx=16, pady=(12, 0))
 
-        # 选项行1
-        opt_frame = ttk.Frame(main)
-        opt_frame.pack(fill="x", pady=(0, 4))
-        self.playlist_var = tk.BooleanVar()
-        ttk.Checkbutton(opt_frame, text="播放列表/合集", variable=self.playlist_var).pack(side="left")
-        self.style_var = tk.StringVar(value="auto")
-        ttk.Label(opt_frame, text="  总结风格：").pack(side="left")
-        style_combo = ttk.Combobox(opt_frame, textvariable=self.style_var,
-                                   values=["auto", "knowledge_points", "steps", "core_ideas"],
-                                   state="readonly", width=16)
-        style_combo.pack(side="left", padx=(4, 0))
+        # URL 输入卡片
+        with self._card(main, pady=(0, 10)) as card:
+            tk.Label(card, text="视频链接", font=F["section"],
+                     fg=C["text"], bg=C["card"]).pack(anchor="w")
 
-        # 输出格式
-        fmt_frame = ttk.Frame(main)
-        fmt_frame.pack(fill="x", pady=(0, 8))
-        ttk.Label(fmt_frame, text="输出格式：").pack(side="left")
-        self.fmt_md = tk.BooleanVar(value=True)
-        self.fmt_txt = tk.BooleanVar(value=False)
-        self.fmt_html = tk.BooleanVar(value=False)
-        ttk.Checkbutton(fmt_frame, text=".md", variable=self.fmt_md).pack(side="left", padx=(4, 0))
-        ttk.Checkbutton(fmt_frame, text=".txt", variable=self.fmt_txt).pack(side="left", padx=(4, 0))
-        ttk.Checkbutton(fmt_frame, text=".html", variable=self.fmt_html).pack(side="left", padx=(4, 0))
+            self.url_text = tk.Text(card, height=3, wrap="word",
+                                    font=F["body"], bg="#f9fafb", fg=C["text"],
+                                    relief="solid", borderwidth=1,
+                                    padx=10, pady=8)
+            self.url_text.pack(fill="x", pady=(8, 4))
+
+            tk.Label(card, text="支持 URL 和本地文件路径，每行一个",
+                     font=F["small"], fg=C["muted"], bg=C["card"]).pack(anchor="w")
+
+        # 选项卡片
+        with self._card(main, pady=(0, 10)) as card:
+            row1 = tk.Frame(card, bg=C["card"])
+            row1.pack(fill="x", pady=(0, 8))
+
+            self.playlist_var = tk.BooleanVar()
+            tk.Checkbutton(row1, text="播放列表/合集", variable=self.playlist_var,
+                           font=F["body"], bg=C["card"],
+                           activebackground=C["card"],
+                           selectcolor=C["card"]).pack(side="left")
+
+            tk.Label(row1, text="  总结风格：", font=F["body"],
+                     fg=C["text"], bg=C["card"]).pack(side="left")
+            self.style_var = tk.StringVar(value="auto")
+            ttk.Combobox(row1, textvariable=self.style_var,
+                         values=["auto", "knowledge_points", "steps", "core_ideas"],
+                         state="readonly", width=18,
+                         font=F["body"]).pack(side="left", padx=(6, 0))
+
+            row2 = tk.Frame(card, bg=C["card"])
+            row2.pack(fill="x")
+            tk.Label(row2, text="输出格式：", font=F["body"],
+                     fg=C["text"], bg=C["card"]).pack(side="left")
+
+            self.fmt_md = tk.BooleanVar(value=True)
+            self.fmt_txt = tk.BooleanVar(value=False)
+            self.fmt_html = tk.BooleanVar(value=False)
+            for v, lb in [(self.fmt_md, ".md"), (self.fmt_txt, ".txt"), (self.fmt_html, ".html")]:
+                tk.Checkbutton(row2, text=lb, variable=v, font=F["body"],
+                               bg=C["card"], activebackground=C["card"],
+                               selectcolor=C["card"]).pack(side="left", padx=(12, 0))
 
         # 按钮行
-        btn_frame = ttk.Frame(main)
-        btn_frame.pack(fill="x", pady=(0, 8))
-        self.start_btn = ttk.Button(btn_frame, text="开始处理", command=self.start)
-        self.start_btn.pack(side="left", padx=(0, 8))
-        self.open_btn = ttk.Button(btn_frame, text="打开输出目录", command=self.open_output)
-        self.open_btn.pack(side="left")
+        btn_row = tk.Frame(main, bg=C["bg"])
+        btn_row.pack(fill="x", pady=(0, 10))
 
-        # 进度条
+        self.start_btn = tk.Button(btn_row, text="▶  开始处理", command=self.start,
+                                   font=F["section"], fg="white", bg=C["primary"],
+                                   activebackground=C["primary2"],
+                                   activeforeground="white",
+                                   relief="flat", cursor="hand2",
+                                   padx=24, pady=8, bd=0)
+        self.start_btn.pack(side="left", padx=(0, 8))
+
+        self.stop_btn = tk.Button(btn_row, text="■  停止", command=self.stop,
+                                  font=F["section"], fg="white", bg=C["red"],
+                                  activebackground="#dc2626",
+                                  activeforeground="white",
+                                  relief="flat", cursor="hand2",
+                                  padx=20, pady=8, bd=0)
+
+        tk.Button(btn_row, text="打开输出目录", command=self.open_output,
+                  font=F["body"], fg=C["text"], bg=C["card"],
+                  activebackground="#f3f4f6", relief="solid",
+                  borderwidth=1, padx=16, pady=8).pack(side="left")
+
+        # 进度条（初始隐藏）
         self.progress = ttk.Progressbar(main, mode="indeterminate")
 
-        # 日志区域
-        log_frame = ttk.Frame(main)
-        log_frame.pack(fill="both", expand=True, pady=(8, 0))
-        self.log = tk.Text(log_frame, height=10, wrap="word", state="disabled",
-                           font=("Consolas", 9))
-        scrollbar = ttk.Scrollbar(log_frame, command=self.log.yview)
-        self.log.configure(yscrollcommand=scrollbar.set)
+        # 日志区域（暗色终端风格）
+        log_frame = tk.Frame(main, bg=C["log_bg"], highlightthickness=0)
+        log_frame.pack(fill="both", expand=True)
+
+        self.log = tk.Text(log_frame, wrap="word", state="disabled",
+                           font=F["mono"], bg=C["log_bg"], fg=C["log_fg"],
+                           relief="flat", borderwidth=0, padx=12, pady=8,
+                           insertbackground="white")
         self.log.pack(side="left", fill="both", expand=True)
+
+        scrollbar = tk.Scrollbar(log_frame, bg=C["log_bg"],
+                                 troughcolor=C["log_bg"],
+                                 activebackground=C["muted"])
         scrollbar.pack(side="right", fill="y")
+        self.log.configure(yscrollcommand=scrollbar.set)
+        scrollbar.configure(command=self.log.yview)
 
-        self._process = None
+        # 日志颜色标签
+        self.log.tag_configure("warn",   foreground=C["yellow"])
+        self.log.tag_configure("error",  foreground=C["red"])
+        self.log.tag_configure("ok",     foreground=C["green"])
+        self.log.tag_configure("stage",  foreground=C["blue"])
 
-    def log_append(self, text):
+        # 底部状态栏
+        bar = tk.Frame(self.root, bg=C["border"], height=26)
+        bar.pack(fill="x", side="bottom")
+        bar.pack_propagate(False)
+        self.status_label = tk.Label(bar, text="就绪", font=F["small"],
+                                     fg=C["muted"], bg=C["bg"], anchor="w", padx=14)
+        self.status_label.pack(fill="x")
+
+    @contextmanager
+    def _card(self, parent, **pack_kw):
+        f = tk.Frame(parent, bg=C["card"], highlightbackground=C["border"],
+                     highlightthickness=1, padx=16, pady=12)
+        f.pack(fill="x", **pack_kw)
+        yield f
+
+    # ------------------------------------------------------------------
+    # 日志
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _log_tag(text):
+        upper = text.upper()
+        if "[WARN]" in upper or "失败" in text or "跳过" in text:
+            return "warn"
+        if "[ERROR]" in upper or "错误" in text or "异常" in text:
+            return "error"
+        if "完成" in text or "已保存" in text or "成功" in text:
+            return "ok"
+        if text.startswith("[") and "/" in text[:6]:
+            return "stage"
+        return None
+
+    def _log(self, text):
+        tag = self._log_tag(text)
+
         self.log.configure(state="normal")
-        self.log.insert("end", text + "\n")
+        if tag:
+            self.log.insert("end", text + "\n", tag)
+        else:
+            self.log.insert("end", text + "\n")
         self.log.see("end")
         self.log.configure(state="disabled")
 
+    def _set_status(self, text):
+        self.status_label.configure(text=text)
+
+    # ------------------------------------------------------------------
+    # 业务逻辑
+    # ------------------------------------------------------------------
+
     def start(self):
-        text = self.url_text.get("1.0", "end").strip()
-        urls = [u.strip() for u in text.split("\n") if u.strip()]
+        raw = self.url_text.get("1.0", "end").strip()
+        urls = [u.strip() for u in raw.split("\n") if u.strip()]
         if not urls:
-            messagebox.showwarning("提示", "请输入视频链接")
+            messagebox.showwarning("提示", "请输入视频链接或本地文件路径")
             return
 
-        self.start_btn.configure(state="disabled")
+        self.start_btn.pack_forget()
+        self.stop_btn.pack(side="left", padx=(0, 8), before=self.start_btn)
         self.progress.pack(fill="x", pady=(0, 8))
         self.progress.start()
-        self.log_append(f"共 {len(urls)} 个链接，开始处理...")
+        self._log(f"共 {len(urls)} 个任务，开始处理...")
+        self._set_status(f"处理中 (0/{len(urls)})")
 
-        thread = threading.Thread(target=self._run_pipeline, args=(urls,), daemon=True)
-        thread.start()
+        self._stopped = False
+        threading.Thread(target=self._run, args=(urls,), daemon=True).start()
 
-    def _run_pipeline(self, urls):
+    def stop(self):
+        self._stopped = True
+        if self._process and self._process.poll() is None:
+            self._process.terminate()
+        self._log("\n[WARN] 用户停止")
+        self._set_status("已停止")
+        self._done()
+
+    def _run(self, urls):
         try:
-            python = get_python()
+            python = find_venv_executable("python")
             formats = []
-            if self.fmt_md.get(): formats.append("md")
-            if self.fmt_txt.get(): formats.append("txt")
+            if self.fmt_md.get():   formats.append("md")
+            if self.fmt_txt.get():  formats.append("txt")
             if self.fmt_html.get(): formats.append("html")
 
             for i, url in enumerate(urls):
-                self.log_append(f"\n[{i+1}/{len(urls)}] {url}")
+                if self._stopped:
+                    break
+                self._set_status(f"处理中 ({i+1}/{len(urls)})")
+                self._log(f"\n[{i+1}/{len(urls)}] {url}")
 
                 cmd = [python, str(PROJECT_ROOT / "main.py"), url]
                 if self.playlist_var.get():
@@ -128,32 +260,33 @@ class App:
                 cmd.extend(["--output-formats", ",".join(formats)])
 
                 self._process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    cwd=str(PROJECT_ROOT),
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, cwd=str(PROJECT_ROOT),
                 )
 
                 for line in self._process.stdout:
                     line = line.strip()
                     if line:
-                        self.log_append(line)
+                        self.root.after(0, lambda t=line: self._log(t))
 
                 self._process.wait()
                 if self._process.returncode != 0:
-                    self.log_append(f"  [跳过] 处理出错")
+                    self._log(f"  [错误] 处理失败 (退出码 {self._process.returncode})")
 
-            self.log_append("\n全部完成!")
+            self._log("\n全部完成!")
+            self._set_status("完成")
 
         except Exception as e:
-            self.log_append(f"异常: {e}")
+            self._log(f"异常: {e}")
+            self._set_status("出错")
         finally:
             self.root.after(0, self._done)
 
     def _done(self):
         self.progress.stop()
         self.progress.pack_forget()
+        self.stop_btn.pack_forget()
+        self.start_btn.pack(side="left", padx=(0, 8))
         self.start_btn.configure(state="normal")
 
     def open_output(self):

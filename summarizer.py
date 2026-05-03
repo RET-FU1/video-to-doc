@@ -3,18 +3,8 @@
 支持 OpenAI 兼容 API（DeepSeek、智谱、通义千问、月之暗面等国内服务商）
 支持长文本自动分段总结 + 汇总
 """
-import os
-from pathlib import Path
-
-# 加载 .env
-_ENV_FILE = Path(__file__).parent / ".env"
-if _ENV_FILE.exists():
-    with open(_ENV_FILE, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, _, val = line.partition("=")
-                os.environ.setdefault(key.strip(), val.strip())
+import copy
+from utils import load_env
 
 
 class BaseSummarizer:
@@ -35,6 +25,7 @@ class OpenAICompatSummarizer(BaseSummarizer):
     }
 
     def __init__(self, config):
+        import os
         from openai import OpenAI
 
         self.config = config.get("summarizer", {})
@@ -44,13 +35,15 @@ class OpenAICompatSummarizer(BaseSummarizer):
 
         base_url = self.config.get("base_url", "https://api.deepseek.com")
         api_key = os.environ.get("API_KEY", "")
+        if not api_key:
+            raise ValueError("API_KEY 未设置，请在 .env 文件中配置 API_KEY")
 
         self.client = OpenAI(api_key=api_key, base_url=base_url)
 
     def summarize(self, text, meta, style="auto"):
         prompt_instruction = self.STYLE_PROMPTS.get(style, self.STYLE_PROMPTS["auto"])
 
-        if len(text) < self.max_chunk:
+        if len(text) <= self.max_chunk:
             return self._summarize_chunk(text, meta, prompt_instruction)
 
         return self._summarize_long(text, meta, prompt_instruction)
@@ -105,12 +98,11 @@ class OpenAICompatSummarizer(BaseSummarizer):
             f"## 第 {i+1} 部分\n{s}" for i, s in enumerate(chunk_summaries)
         )
 
-        final_prompt = (
-            "以下是一个视频被分成多个部分总结后的结果。"
-            "请基于这些分段总结，写一份完整的、结构清晰的总体总结。"
-            "去重合并重复的内容，按逻辑重新组织。\n\n" + combined
+        merge_instruction = (
+            "请基于以下多个部分的总结，写一份完整的、结构清晰的总体总结。"
+            "去重合并重复的内容，按逻辑重新组织。"
         )
-        return self._summarize_chunk(combined, meta, final_prompt)
+        return self._summarize_chunk(combined, meta, merge_instruction)
 
     @staticmethod
     def _split_text(text, max_chars):
@@ -133,22 +125,25 @@ class OpenAICompatSummarizer(BaseSummarizer):
         return chunks or [text]
 
 
+class OllamaSummarizer(OpenAICompatSummarizer):
+    """Ollama 本地模型总结器"""
+
+    def __init__(self, config):
+        config = copy.deepcopy(config)
+        config.setdefault("summarizer", {})["base_url"] = \
+            config.get("summarizer", {}).get("base_url", "http://localhost:11434/v1")
+        super().__init__(config)
+
+
 def create_summarizer(config):
     """工厂函数：根据配置创建总结器"""
+    load_env()
+
     provider = config.get("summarizer", {}).get("provider", "openai")
 
     if provider == "openai":
         return OpenAICompatSummarizer(config)
-
     if provider == "ollama":
-        from openai import OpenAI
-
-        class OllamaSummarizer(OpenAICompatSummarizer):
-            def __init__(self, config):
-                config.setdefault("summarizer", {})["base_url"] = \
-                    config.get("summarizer", {}).get("base_url", "http://localhost:11434/v1")
-                super().__init__(config)
-
         return OllamaSummarizer(config)
 
     raise ValueError(f"未知的总结器: {provider}")

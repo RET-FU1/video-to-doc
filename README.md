@@ -1,12 +1,14 @@
 # Video-to-Doc
 
-一键将网络视频（B站、YouTube 等）下载、转写为文字文档，并用 AI 自动生成内容总结。
+一键将网络视频（B站、YouTube 等）或本地视频文件转写为文字文档，并用 AI 自动生成内容总结。
 
 ## 功能
 
-- **图形界面** — 双击启动，粘贴链接即可，支持多链接队列处理
+- **图形界面** — 双击启动，粘贴链接即可，支持多链接队列处理、实时彩色日志、随时停止
 - **视频下载** — 基于 yt-dlp，支持 B站、YouTube 等 1000+ 平台
+- **本地视频** — 支持本地视频文件路径，跳过下载直接转写
 - **语音转文字** — 基于 faster-whisper，本地 GPU 加速，无需联网
+- **说话人分离** — 可选 whisperX 引擎，区分多人对话并标记发言人
 - **AI 总结** — 兼容 OpenAI 接口（默认 DeepSeek），支持多种总结风格
 - **多格式输出** — 转写和总结可同时输出 `.md` `.txt` `.html`
 - **播放列表** — 支持合集/播放列表批量处理
@@ -24,7 +26,7 @@
 ### 1. 安装 ffmpeg
 
 ```bash
-# Windows
+# Windows: winget / 官网下载解压 → 加入 PATH
 winget install Gyan.FFmpeg
 
 # Mac
@@ -60,12 +62,9 @@ API_KEY=sk-your-api-key
 | 服务商 | base_url | model |
 |--------|----------|-------|
 | **DeepSeek**（默认） | `https://api.deepseek.com` | `deepseek-v4-pro` / `deepseek-v4-flash` |
-| DeepSeek (Anthropic) | `https://api.deepseek.com/anthropic` | 同上 |
 | 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-flash` |
 | 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-turbo` |
 | 月之暗面 | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
-
-> **注意：** `deepseek-chat` 和 `deepseek-reasoner` 将于 2026/07/24 弃用。
 
 如果不需要 AI 总结，跳过此步骤。转写功能不依赖 API。
 
@@ -73,34 +72,37 @@ API_KEY=sk-your-api-key
 
 **图形界面（推荐）：**
 
-Windows 用户双击 `启动.vbs` 即可。其他系统：
+双击 `启动.vbs`（完全无窗口）或 `启动.bat`（有终端）。其他系统：
 
 ```bash
 venv/bin/python gui.py    # Mac / Linux
-venv\Scripts\python gui.py  # Windows（命令行）
+venv\Scripts\python gui.py  # Windows
 ```
 
 GUI 功能：
-- 多行输入框，每行一个视频链接，支持多链接队列处理
-- 可勾选输出格式：`.md` `.txt` `.html`
+- 多行输入框，每行一个视频链接或本地文件路径
+- 勾选输出格式：`.md` `.txt` `.html`
 - 一键打开输出目录
+- 处理中可点击红色停止按钮终止
 
 **命令行：**
 
 ```bash
 # 激活虚拟环境
-# Windows
-venv\Scripts\activate
-# Mac/Linux
-source venv/bin/activate
+venv\Scripts\activate      # Windows
+source venv/bin/activate   # Mac/Linux
 
-# 下载并转写单个视频
+# 在线视频
 python main.py "https://www.bilibili.com/video/BV1xx411x7xx"
 
-# 指定输出格式（逗号分隔）
+# 本地视频文件
+python main.py "C:/videos/myvideo.mp4"
+python main.py "./meeting.mp4"
+
+# 指定输出格式
 python main.py "https://example.com/video" --output-formats md,txt,html
 
-# 处理播放列表/合集
+# 播放列表
 python main.py "https://www.youtube.com/playlist?list=xxx" --playlist
 
 # 指定总结风格
@@ -112,7 +114,7 @@ python main.py "https://example.com/video" --summary-style knowledge_points
 ```
 output/
 └── {标题}/
-    ├── video.mp4         # 原始视频
+    ├── video.mp4         # 原始视频（在线）/ 复制（本地）
     ├── video.md          # 转写文档
     ├── video.txt         # （可选）
     ├── video.html        # （可选）
@@ -145,31 +147,62 @@ output/
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `whisper.model` | 模型大小 | `large-v3-turbo` |
+| `output_dir` | 输出目录 | `./output` |
 | `whisper.device` | 推理设备 | `cuda` |
+| `whisper.compute_type` | 精度 | `float16`（GPU）/ `int8`（CPU） |
 | `whisper.language` | 转写语言 | `zh` |
+| `summarizer.provider` | API 类型 | `openai` |
 | `summarizer.base_url` | API 地址 | DeepSeek |
 | `summarizer.model` | 模型名 | `deepseek-v4-pro` |
+| `summarizer.max_chunk_tokens` | 分段阈值 | `80000` |
 | `summarizer.output_formats` | 输出格式 | `[md]` |
+| `diarization.enabled` | 启用说话人分离 | `false` |
+| `diarization.min_speakers` | 最少说话人数 | `2` |
+| `diarization.max_speakers` | 最多说话人数 | `5` |
 | `downloader.format` | 视频质量 | `bestvideo[height<=1080]+bestaudio/best` |
 | `downloader.cookies_file` | Cookie 文件 | 空 |
 
-### 模型选择
+## 说话人分离（可选）
 
-| 模型 | 速度 | 准确率 | 适用场景 |
-|------|------|--------|----------|
-| `tiny` | 极快 | 一般 | 实时转写 |
-| `small` | 快 | 还行 | 快速预览 |
-| `large-v3-turbo` | 较快 | 很高 | **日常使用（推荐）** |
-| `large-v3` | 慢 | 最高 | 追求极致 |
+需要 `pip install whisperx`，并在 `.env` 中配置 HuggingFace Token：
+
+```
+HF_TOKEN=hf_your_token
+```
+
+> 从 [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) 创建 Read token，并先到 [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) 和 [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0) 接受用户协议。
+
+然后在 `config.yaml` 中开启：
+
+```yaml
+diarization:
+  enabled: true
+```
+
+启用后转写文档会按发言人分段标记：
+
+```markdown
+# 视频标题
+
+## SPEAKER_00 (00:00:00.000 - 00:01:23.456)
+主持人开场介绍今天的主题。
+
+## SPEAKER_01 (00:01:23.456 - 00:03:45.678)
+我来分享一下技术架构的设计思路。
+
+## SPEAKER_00 (00:03:45.678 - 00:05:12.345)
+这个方案的核心优势是什么？
+```
+
+> **注意：** whisperX 在 Python 3.12+ 可能有依赖冲突，建议 Python 3.10-3.11。
 
 ## 常见问题
 
 **Q: 启动 GUI 无反应？**
-A: 确保已运行 `python setup.py` 完成初始化。用命令行 `venv\Scripts\python gui.py` 启动可看到错误信息。
+A: 确保已运行 `python setup.py` 完成初始化，且 `启动.bat` 中的 venv 路径正确。用命令行 `venv\Scripts\python gui.py` 启动可看到错误信息。
 
 **Q: GPU 不可用？**
-A: 自动回退到 CPU。确保已安装 NVIDIA 驱动，且 `nvidia-cublas-cu12` 已安装（setup.py 会自动安装）。
+A: 自动回退到 CPU。确保已安装 NVIDIA 驱动，且 `nvidia-cublas-cu12` 和 `nvidia-cuda-runtime-cu12` 已安装（setup.py 会自动安装）。
 
 **Q: 下载失败？**
 A: 更新 yt-dlp：`venv/Scripts/pip install -U yt-dlp`
@@ -180,10 +213,14 @@ A: 在 `config.yaml` 中设置 `downloader.cookies_file` 指向浏览器导出�
 **Q: 下载播放列表只下了第一个视频？**
 A: 确保加了 `--playlist` 参数，或在 GUI 中勾选"播放列表/合集"。
 
+**Q: 说话人分离不生效？**
+A: 检查三个条件：(1) `pip install whisperx` 成功，(2) `.env` 中 `HF_TOKEN` 已设置，(3) `config.yaml` 中 `diarization.enabled: true`。任何环节缺失会自动回退基础转写并给出提示。
+
 ## 技术栈
 
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — 视频下载
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — 语音转文字（CTranslate2 推理引擎）
+- [whisperX](https://github.com/m-bain/whisperX) — 说话人分离（可选）
 - [ModelScope](https://modelscope.cn) — 模型下载
 - OpenAI 兼容 API — AI 总结（默认 DeepSeek）
 - tkinter — 图形界面（Python 内置）

@@ -8,6 +8,7 @@
 3. 设置模型缓存到项目目录
 4. 检查 ffmpeg 可用性
 5. 检查 GPU / CUDA 加速
+6. 检查说话人分离支持（可选）
 """
 import os
 import sys
@@ -19,8 +20,6 @@ PROJECT_ROOT = Path(__file__).parent.resolve()
 VENV_DIR = PROJECT_ROOT / "venv"
 REQUIREMENTS = PROJECT_ROOT / "requirements.txt"
 MODEL_CACHE = PROJECT_ROOT / "models"
-MODEL_NAME = "large-v3-turbo"
-MODEL_REPO = "pengzhendong/faster-whisper-large-v3-turbo"  # ModelScope 上的模型
 PIP_INDEX = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 
@@ -32,32 +31,30 @@ def run(cmd, **kwargs):
 
 def get_python():
     """获取虚拟环境中的 python 路径"""
-    if sys.platform == "win32":
-        return str(VENV_DIR / "Scripts" / "python.exe")
-    return str(VENV_DIR / "bin" / "python")
+    from utils import find_venv_executable
+    return find_venv_executable("python")
 
 
 def get_pip():
     """获取虚拟环境中的 pip 路径"""
-    if sys.platform == "win32":
-        return str(VENV_DIR / "Scripts" / "pip.exe")
-    return str(VENV_DIR / "bin" / "pip")
+    from utils import find_venv_executable
+    return find_venv_executable("pip")
 
 
 def step1_create_venv():
     """创建虚拟环境"""
     if VENV_DIR.exists():
-        print("[1/5] 虚拟环境已存在，跳过创建")
+        print("[1/6] 虚拟环境已存在，跳过创建")
         return
 
-    print("[1/5] 创建虚拟环境...")
+    print("[1/6] 创建虚拟环境...")
     run([sys.executable, "-m", "venv", str(VENV_DIR)])
     print("  虚拟环境创建完成")
 
 
 def step2_install_deps():
     """安装依赖"""
-    print("[2/5] 安装 Python 依赖...")
+    print("[2/6] 安装 Python 依赖...")
     pip = get_pip()
     run([pip, "install", "-r", str(REQUIREMENTS), "-i", PIP_INDEX,
          "--trusted-host", "pypi.tuna.tsinghua.edu.cn"])
@@ -70,11 +67,11 @@ def step3_download_model():
     if model_dir.exists() and any(
         f.suffix == ".bin" for f in model_dir.iterdir()
     ):
-        print("[3/5] 模型已存在，跳过下载")
+        print("[3/6] 模型已存在，跳过下载")
         return
 
     python = get_python()
-    print(f"[3/5] 模型尚未下载（约 1.6GB）")
+    print(f"[3/6] 模型尚未下载（约 1.6GB）")
     print()
     print("  请在终端中运行以下命令下载模型：")
     print(f"    {python} download_model.py")
@@ -85,7 +82,7 @@ def step3_download_model():
 
 def step4_check_ffmpeg():
     """检查 ffmpeg"""
-    print("[4/5] 检查 ffmpeg...")
+    print("[4/6] 检查 ffmpeg...")
     if shutil.which("ffmpeg"):
         print("  ffmpeg 可用")
         return
@@ -97,11 +94,25 @@ def step4_check_ffmpeg():
     print("    Linux:   sudo apt install ffmpeg")
 
 
+def step6_check_diarization():
+    """检查 whisperX（可选）"""
+    print("[6/6] 检查说话人分离支持（可选）...")
+    try:
+        import whisperx
+        print("  whisperX 已安装，说话人分离可用")
+    except ImportError:
+        print("  whisperX 未安装（可选）")
+        print("  如需说话人分离功能:")
+        print("    1. 在 .env 中设置 HF_TOKEN=你的_token")
+        print("    2. pip install whisperx")
+        print("    3. 在 config.yaml 中设置 diarization.enabled: true")
+        print("  注意: whisperX 在 Python 3.12+ 可能有兼容性问题")
+
+
 def step5_check_gpu():
     """检查 GPU / CUDA"""
-    print("[5/5] 检查 GPU 加速...")
+    print("[5/6] 检查 GPU 加速...")
     try:
-        import subprocess
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
             capture_output=True, text=True
@@ -135,6 +146,7 @@ def main():
         step3_download_model()
         step4_check_ffmpeg()
         step5_check_gpu()
+        step6_check_diarization()
     except subprocess.CalledProcessError as e:
         print(f"\n[ERROR] 步骤失败: {e}")
         sys.exit(1)
@@ -147,9 +159,9 @@ def main():
     print(f"    {get_python()} main.py <视频URL>")
     print(f"    {get_python()} main.py <播放列表URL> --playlist")
     print()
-    print("  使用前请设置 API Key（如需 AI 总结）:")
+    print("  使用前请设置 .env:")
     print("    cp .env.example .env")
-    print("    编辑 .env 填入 API_KEY")
+    print("    编辑 .env 填入 API_KEY（AI 总结）和 HF_TOKEN（说话人分离，可选）")
     print("=" * 60)
 
 
