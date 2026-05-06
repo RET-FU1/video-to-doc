@@ -52,6 +52,26 @@ def is_done(folder):
     return get_state(folder) in ("downloaded", "transcribed", "done")
 
 
+def split_text(text, max_chars, sep="\n\n"):
+    """按分隔符粗略分段，每段不超过 max_chars"""
+    paragraphs = text.split(sep)
+    chunks = []
+    current = ""
+
+    for p in paragraphs:
+        if len(current) + len(p) < max_chars:
+            current += p + sep
+        else:
+            if current:
+                chunks.append(current.strip())
+            current = p + sep
+
+    if current.strip():
+        chunks.append(current.strip())
+
+    return chunks or [text]
+
+
 def load_env():
     """加载项目根目录 .env 到 os.environ"""
     env_file = PROJECT_ROOT / ".env"

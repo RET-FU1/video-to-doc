@@ -7,7 +7,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from utils import sanitize_filename, find_ffmpeg, find_venv_executable, get_state, set_state, is_done
+from utils import sanitize_filename, find_venv_executable, get_state, set_state, is_done
 
 
 class Downloader:
@@ -15,13 +15,7 @@ class Downloader:
         self.config = config
         self.output_root = Path(output_root)
         self.dl_config = config.get("downloader", {})
-        self._ffmpeg = None
         self._ytdlp = None
-
-    def _get_ffmpeg(self):
-        if not self._ffmpeg:
-            self._ffmpeg = find_ffmpeg()
-        return self._ffmpeg
 
     def _get_ytdlp(self):
         if not self._ytdlp:

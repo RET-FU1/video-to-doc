@@ -4,24 +4,17 @@
 支持长文本自动分段总结 + 汇总
 """
 import copy
-from utils import load_env
+from utils import load_env, split_text
 
 
-class BaseSummarizer:
-    """总结器基类"""
-
-    def summarize(self, text, meta, style="auto"):
-        raise NotImplementedError
-
-
-class OpenAICompatSummarizer(BaseSummarizer):
+class OpenAICompatSummarizer:
     """OpenAI 兼容 API 总结器 — 支持所有兼容 OpenAI 接口的服务商"""
 
     STYLE_PROMPTS = {
         "auto": "请对这个视频内容做一个全面的总结。包括：核心主题、主要观点、关键结论。",
         "knowledge_points": "请提取这个视频中的全部知识点，以结构化方式列出。每条知识点包括：概念名称、解释、在视频中的位置。",
         "steps": "请将这个视频中的操作步骤或方法论逐个提取出来，按顺序列出。每一步包括：做什么、怎么做、注意事项。",
-        "core_ideas": "请提炼这个视频的核心思想/观点，用不超过10条列出，每条一句话。",
+        "core_ideas": "请提炼这个视频的核心思想/观点，按实际内容总结，每条一句话。",
     }
 
     def __init__(self, config):
@@ -82,7 +75,7 @@ class OpenAICompatSummarizer(BaseSummarizer):
 
     def _summarize_long(self, text, meta, prompt_instruction):
         """长文本分段总结"""
-        chunks = self._split_text(text, self.max_chunk)
+        chunks = split_text(text, self.max_chunk)
         chunk_summaries = []
 
         for i, chunk in enumerate(chunks):
@@ -103,27 +96,6 @@ class OpenAICompatSummarizer(BaseSummarizer):
             "去重合并重复的内容，按逻辑重新组织。"
         )
         return self._summarize_chunk(combined, meta, merge_instruction)
-
-    @staticmethod
-    def _split_text(text, max_chars):
-        """按段落粗略分段"""
-        paragraphs = text.split("\n\n")
-        chunks = []
-        current = ""
-
-        for p in paragraphs:
-            if len(current) + len(p) < max_chars:
-                current += p + "\n\n"
-            else:
-                if current:
-                    chunks.append(current.strip())
-                current = p + "\n\n"
-
-        if current.strip():
-            chunks.append(current.strip())
-
-        return chunks or [text]
-
 
 class OllamaSummarizer(OpenAICompatSummarizer):
     """Ollama 本地模型总结器"""

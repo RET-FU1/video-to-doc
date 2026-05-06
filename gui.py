@@ -70,7 +70,7 @@ class App:
 
         # URL 输入卡片
         with self._card(main, pady=(0, 10)) as card:
-            tk.Label(card, text="视频链接", font=F["section"],
+            tk.Label(card, text="视频/音频", font=F["section"],
                      fg=C["text"], bg=C["card"]).pack(anchor="w")
 
             self.url_text = tk.Text(card, height=3, wrap="word",
@@ -79,13 +79,13 @@ class App:
                                     padx=10, pady=8)
             self.url_text.pack(fill="x", pady=(8, 4))
 
-            tk.Label(card, text="支持 URL 和本地文件路径，每行一个",
+            tk.Label(card, text="支持 URL / 本地视频 / 本地音频 (mp3/wav/m4a等) / 文件夹路径。文件夹模式只需填写一行",
                      font=F["small"], fg=C["muted"], bg=C["card"]).pack(anchor="w")
 
         # 选项卡片
         with self._card(main, pady=(0, 10)) as card:
             row1 = tk.Frame(card, bg=C["card"])
-            row1.pack(fill="x", pady=(0, 8))
+            row1.pack(fill="x", pady=(0, 6))
 
             self.playlist_var = tk.BooleanVar()
             tk.Checkbutton(row1, text="播放列表/合集", variable=self.playlist_var,
@@ -93,24 +93,54 @@ class App:
                            activebackground=C["card"],
                            selectcolor=C["card"]).pack(side="left")
 
-            tk.Label(row1, text="  总结风格：", font=F["body"],
-                     fg=C["text"], bg=C["card"]).pack(side="left")
-            self.style_var = tk.StringVar(value="auto")
-            ttk.Combobox(row1, textvariable=self.style_var,
-                         values=["auto", "knowledge_points", "steps", "core_ideas"],
-                         state="readonly", width=18,
-                         font=F["body"]).pack(side="left", padx=(6, 0))
+            self.folder_var = tk.BooleanVar()
+            tk.Checkbutton(row1, text="文件夹模式", variable=self.folder_var,
+                           font=F["body"], bg=C["card"],
+                           activebackground=C["card"],
+                           selectcolor=C["card"]).pack(side="left", padx=(12, 0))
+
+            self.dlonly_var = tk.BooleanVar()
+            tk.Checkbutton(row1, text="仅下载", variable=self.dlonly_var,
+                           font=F["body"], bg=C["card"],
+                           activebackground=C["card"],
+                           selectcolor=C["card"]).pack(side="left", padx=(12, 0))
 
             row2 = tk.Frame(card, bg=C["card"])
-            row2.pack(fill="x")
-            tk.Label(row2, text="输出格式：", font=F["body"],
+            row2.pack(fill="x", pady=(0, 6))
+
+            tk.Label(row2, text="总结风格：", font=F["body"],
+                     fg=C["text"], bg=C["card"]).pack(side="left")
+
+            self.style_labels = ["全面总结", "知识点提取", "操作步骤", "核心观点"]
+            self.style_map = {
+                "全面总结": "auto",
+                "知识点提取": "knowledge_points",
+                "操作步骤": "steps",
+                "核心观点": "core_ideas",
+            }
+
+            self.style_var = tk.StringVar(value="全面总结")
+            style_combo = ttk.Combobox(row2, textvariable=self.style_var,
+                         values=self.style_labels,
+                         state="readonly", width=14,
+                         font=F["body"])
+            style_combo.pack(side="left", padx=(6, 0))
+            style_combo.bind("<<ComboboxSelected>>", self._on_style_change)
+
+            self.style_desc = tk.Label(row2, text="— 完整总结：核心主题、主要观点、关键结论",
+                                       font=F["small"], fg=C["muted"], bg=C["card"])
+            self.style_desc.pack(side="left", padx=(6, 0))
+
+            row3 = tk.Frame(card, bg=C["card"])
+            row3.pack(fill="x")
+            tk.Label(row3, text="输出格式：", font=F["body"],
                      fg=C["text"], bg=C["card"]).pack(side="left")
 
             self.fmt_md = tk.BooleanVar(value=True)
             self.fmt_txt = tk.BooleanVar(value=False)
             self.fmt_html = tk.BooleanVar(value=False)
             for v, lb in [(self.fmt_md, ".md"), (self.fmt_txt, ".txt"), (self.fmt_html, ".html")]:
-                tk.Checkbutton(row2, text=lb, variable=v, font=F["body"],
+                tk.Checkbutton(row3, text=lb, variable=v, font=F["body"],
                                bg=C["card"], activebackground=C["card"],
                                selectcolor=C["card"]).pack(side="left", padx=(12, 0))
 
@@ -178,6 +208,16 @@ class App:
                      highlightthickness=1, padx=16, pady=12)
         f.pack(fill="x", **pack_kw)
         yield f
+
+    def _on_style_change(self, event=None):
+        descs = {
+            "全面总结": "— 完整总结：核心主题、主要观点、关键结论",
+            "知识点提取": "— 提取全部知识点，结构化列出，含概念和解释",
+            "操作步骤": "— 按顺序提取操作步骤：做什么、怎么做、注意事项",
+            "核心观点": "— 提炼核心思想/观点，按实际内容总结，每条一句话",
+        }
+        label = self.style_var.get()
+        self.style_desc.configure(text=descs.get(label, ""))
 
     # ------------------------------------------------------------------
     # 日志
@@ -259,10 +299,20 @@ class App:
                 self._set_status(f"处理中 ({i+1}/{len(urls)})")
                 self._log(f"\n[{i+1}/{len(urls)}] {url}")
 
-                cmd = [python, "-u", str(PROJECT_ROOT / "main.py"), url]
-                if self.playlist_var.get():
-                    cmd.append("--playlist")
-                cmd.extend(["--summary-style", self.style_var.get()])
+                cmd = [python, "-u", str(PROJECT_ROOT / "main.py")]
+
+                if self.dlonly_var.get():
+                    cmd.append("--download-only")
+
+                if self.folder_var.get():
+                    cmd.extend(["--folder", url])
+                else:
+                    cmd.append(url)
+                    if self.playlist_var.get():
+                        cmd.append("--playlist")
+
+                style_eng = self.style_map.get(self.style_var.get(), "auto")
+                cmd.extend(["--summary-style", style_eng])
                 cmd.extend(["--output-formats", ",".join(formats)])
 
                 self._process = subprocess.Popen(

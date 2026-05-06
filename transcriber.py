@@ -86,13 +86,18 @@ class Transcriber:
 
         return model
 
-    def transcribe(self, video_path, output_folder):
-        """转写视频，返回 transcript 文件路径"""
+    AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".opus", ".wma"}
+
+    def transcribe(self, input_path, output_folder):
+        """转写视频/音频，返回 transcript 文件路径"""
         output_folder = Path(output_folder)
         output_folder.mkdir(parents=True, exist_ok=True)
 
-        video_stem = Path(video_path).stem
-        safe_name = sanitize_filename(video_stem)
+        input_path = Path(input_path)
+        ext = input_path.suffix.lower()
+        is_audio = ext in self.AUDIO_EXTS
+
+        safe_name = sanitize_filename(input_path.stem)
         transcript_path = output_folder / f"{safe_name}.md"
 
         if transcript_path.exists():
@@ -100,22 +105,27 @@ class Transcriber:
             set_state(output_folder, "transcribed")
             return transcript_path
 
-        print(f"  转写中: {safe_name}")
+        file_type = "音频" if is_audio else "视频"
+        print(f"  转写中 ({file_type}): {safe_name}")
 
         # 尝试说话人分离（如已启用）
         if self.diar_config.get("enabled", False):
             try:
                 return self._transcribe_with_diarization(
-                    video_path, output_folder, safe_name
+                    input_path, output_folder, safe_name
                 )
             except Exception as e:
                 print(f"  [WARN] 说话人分离失败，回退到基础转写: {e}")
 
         # 基础转写路径（faster-whisper）
-        audio_path = output_folder / f"_tmp_audio_{os.getpid()}.mp3"
+        if is_audio:
+            audio_path = input_path
+        else:
+            audio_path = output_folder / f"_tmp_audio_{os.getpid()}.mp3"
 
         try:
-            self._extract_audio(video_path, audio_path)
+            if not is_audio:
+                self._extract_audio(input_path, audio_path)
 
             model = self._get_model()
             language = self.whisper_config.get("language", "zh")
@@ -143,10 +153,10 @@ class Transcriber:
                 else:
                     raise
 
-            transcript_text = self._format_transcript(segs, info)
+            transcript_text = self._format_transcript(segs)
 
             with open(transcript_path, "w", encoding="utf-8") as f:
-                f.write(f"# {video_stem}\n\n")
+                f.write(f"# {safe_name}\n\n")
                 f.write(transcript_text)
 
             print(f"  已保存: {transcript_path.name}")
@@ -154,54 +164,24 @@ class Transcriber:
             return transcript_path
 
         finally:
-            if audio_path.exists():
+            if not is_audio and audio_path.exists():
                 audio_path.unlink()
 
     # ---- 转写文本格式化 ----
 
     @staticmethod
-    def _format_transcript(segments, info):
-        """根据词级时间戳插入标点，生成自然段落文本"""
-        all_words = []
+    def _format_transcript(segments):
+        """拼接 ASR 片段为原始文本（标点和分段由 LLM 后处理负责）"""
+        lines = []
         for seg in segments:
-            if seg.words:
-                all_words.extend(seg.words)
-
-        if not all_words:
-            return "\n\n".join(seg.text.strip() for seg in segments)
-
-        is_zh = (info.language or "").startswith("zh")
-        period = "。" if is_zh else "."
-        comma = "，" if is_zh else ","
-        space = "" if is_zh else " "
-
-        result = []
-        line = ""
-
-        for i, w in enumerate(all_words):
-            line += w.word if (is_zh or not line) else space + w.word
-
-            if i == len(all_words) - 1:
-                result.append(line + period)
-                break
-
-            gap = all_words[i + 1].start - w.end
-
-            if gap > 1.2:
-                result.append(line + period)
-                result.append("")
-                line = ""
-            elif gap > 0.4:
-                result.append(line + period)
-                line = ""
-            elif gap > 0.15:
-                line += comma
-
-        return "\n".join(result)
+            text = seg.text.strip()
+            if text:
+                lines.append(text)
+        return "\n".join(lines)
 
     # ---- whisperX 说话人分离路径 ----
 
-    def _transcribe_with_diarization(self, video_path, output_folder, safe_name):
+    def _transcribe_with_diarization(self, input_path, output_folder, safe_name):
         """whisperX: 转写 + 时间戳对齐 + 说话人分离"""
         import gc
 
@@ -222,10 +202,17 @@ class Transcriber:
             print("  [WARN] 从 https://huggingface.co/settings/tokens 获取 Read token")
             raise ValueError("HF_TOKEN not configured")
 
-        audio_path = output_folder / f"_tmp_audio_{os.getpid()}.mp3"
+        input_path = Path(input_path)
+        is_audio = input_path.suffix.lower() in self.AUDIO_EXTS
+
+        if is_audio:
+            audio_path = input_path
+        else:
+            audio_path = output_folder / f"_tmp_audio_{os.getpid()}.mp3"
 
         try:
-            self._extract_audio(video_path, audio_path)
+            if not is_audio:
+                self._extract_audio(input_path, audio_path)
 
             device = self.whisper_config.get("device", "cuda")
             compute = self.whisper_config.get("compute_type", "float16")
@@ -275,7 +262,7 @@ class Transcriber:
             return self._format_diarized_output(result, output_folder, safe_name)
 
         finally:
-            if audio_path.exists():
+            if not is_audio and audio_path.exists():
                 audio_path.unlink()
 
     def _format_diarized_output(self, result, output_folder, safe_name):

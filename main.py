@@ -2,10 +2,12 @@
 Video-to-Doc — 视频下载、转写、总结一体化工具
 
 用法:
-  python main.py <视频URL>                        单视频
+  python main.py <视频URL>                        单视频/音频
+  python main.py <本地文件路径>                    本地视频/音频文件
   python main.py <视频URL> --playlist              播放列表/合集
   python main.py <视频URL> --skip-download         跳过下载，直接转写+总结
   python main.py <视频URL> --summary-style steps   指定总结风格
+  python main.py --folder <文件夹路径>             批量处理文件夹内所有视频/音频
 
 总结风格选项:
   auto             全面总结（默认）
@@ -38,9 +40,11 @@ def main():
   python main.py https://example.com/video --summary-style knowledge_points
         """,
     )
-    parser.add_argument("url", help="视频 URL 或本地文件路径")
+    parser.add_argument("url", nargs="?", help="视频 URL 或本地文件路径（--folder 模式下可省略）")
     parser.add_argument("--playlist", action="store_true", help="以播放列表模式下载")
+    parser.add_argument("--folder", default=None, help="批量处理文件夹内所有视频")
     parser.add_argument("--skip-download", action="store_true", help="跳过下载（已有视频文件）")
+    parser.add_argument("--download-only", action="store_true", help="仅下载视频，不做转写和总结")
     parser.add_argument("--summary-style", default="auto",
                         choices=["auto", "knowledge_points", "steps", "core_ideas"],
                         help="总结风格 (默认: auto)")
@@ -63,7 +67,17 @@ def main():
     pipeline = Pipeline(config)
 
     try:
-        pipeline.process(args.url, is_playlist=args.playlist)
+        if args.download_only:
+            if args.folder:
+                print("[仅下载] 暂不支持文件夹模式，请逐个下载")
+                sys.exit(1)
+            pipeline.download_only(args.url, is_playlist=args.playlist)
+        elif args.folder:
+            pipeline.process_folder(args.folder)
+        elif args.url:
+            pipeline.process(args.url, is_playlist=args.playlist)
+        else:
+            parser.error("必须提供 URL 或 --folder 参数")
     except KeyboardInterrupt:
         print("\n\n用户中断。断点续跑机制已保留进度，再次运行可继续。")
         sys.exit(0)
