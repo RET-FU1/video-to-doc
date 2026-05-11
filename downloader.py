@@ -34,7 +34,7 @@ class Downloader:
 
         meta = self._fetch_meta(url)
         title = sanitize_filename(meta.get("title", "untitled"))
-        folder = self.output_root / (output_subdir or title)
+        folder = self.output_root / output_subdir / title if output_subdir else self.output_root / title
         folder.mkdir(parents=True, exist_ok=True)
 
         video_path = self._find_video(folder)
@@ -48,7 +48,7 @@ class Downloader:
             self._get_ytdlp(),
             url,
             "-P", str(folder),
-            "-o", "video.%(ext)s",
+            "-o", f"{title}.%(ext)s",
             "--format", self.dl_config.get("format", "bestvideo[height<=1080]+bestaudio/best"),
             "--merge-output-format", "mp4",
             "--no-playlist",
@@ -80,11 +80,11 @@ class Downloader:
             raise ValueError(f"路径不是文件: {path}")
 
         title = sanitize_filename(local.stem)
-        folder = self.output_root / (output_subdir or title)
+        folder = self.output_root / output_subdir / title if output_subdir else self.output_root / title
         folder.mkdir(parents=True, exist_ok=True)
 
         ext = local.suffix or ".mp4"
-        dest = folder / f"video{ext}"
+        dest = folder / f"{title}{ext}"
 
         # 已导入过
         if dest.exists() and is_done(folder):

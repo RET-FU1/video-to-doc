@@ -50,7 +50,7 @@ class Pipeline:
         style = self.config.get("summarizer", {}).get("summary_style", "auto")
         folder = video_path.parent
 
-        if (folder / "summary.md").exists() and get_state(folder) == "done":
+        if (folder / f"{video_path.stem}-总结.md").exists() and get_state(folder) == "done":
             print(f"  已完成，跳过")
             return
 
@@ -61,12 +61,12 @@ class Pipeline:
         print("  后处理（标点 + 分段）...")
         transcript_md = self._polish_transcript(transcript_raw)
         transcript_path.write_text(transcript_md, encoding="utf-8")
-        save_formats(transcript_md, folder / "video", formats)
+        save_formats(transcript_md, folder / video_path.stem, formats)
 
         print("  总结中...")
         summary_text = self.summarizer.summarize(transcript_md, meta, style=style)
         set_state(folder, "done")
-        save_formats(summary_text, folder / "summary", formats)
+        save_formats(summary_text, folder / f"{video_path.stem}-总结", formats)
 
     def _polish_transcript(self, raw_text):
         """用 LLM 为转写文本添加标点并按语义分段"""
@@ -119,6 +119,8 @@ class Pipeline:
 
     def process_folder(self, folder_path):
         """批量处理文件夹内所有视频/音频"""
+        from utils import sanitize_filename
+
         folder = Path(folder_path).resolve()
         if not folder.is_dir():
             raise NotADirectoryError(f"路径不存在或不是文件夹: {folder_path}")
@@ -133,12 +135,13 @@ class Pipeline:
             print(f"  文件夹内未找到视频/音频文件: {folder}")
             return
 
-        print(f"\n[文件夹模式] 共发现 {len(files)} 个文件")
+        group_name = sanitize_filename(folder.name)
+        print(f"\n[文件夹模式] 共发现 {len(files)} 个文件 → 输出: {self.output_root / group_name}")
 
         for i, file_path in enumerate(files):
             print(f"\n--- [{i+1}/{len(files)}] {file_path.stem} ---")
             try:
-                video_path, meta = self.downloader._import_local(str(file_path))
+                video_path, meta = self.downloader._import_local(str(file_path), output_subdir=group_name)
             except Exception as e:
                 print(f"  [FAIL] 导入失败: {e}")
                 continue
