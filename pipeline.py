@@ -61,12 +61,12 @@ class Pipeline:
         print("  后处理（标点 + 分段）...")
         transcript_md = self._polish_transcript(transcript_raw)
         transcript_path.write_text(transcript_md, encoding="utf-8")
-        save_formats(transcript_md, folder / video_path.stem, formats)
+        save_formats(transcript_md, folder / video_path.stem, formats, meta=meta)
 
         print("  总结中...")
         summary_text = self.summarizer.summarize(transcript_md, meta, style=style)
         set_state(folder, "done")
-        save_formats(summary_text, folder / f"{video_path.stem}-总结", formats)
+        save_formats(summary_text, folder / f"{video_path.stem}-总结", formats, meta=meta)
 
     def _polish_transcript(self, raw_text):
         """用 LLM 为转写文本添加标点并按语义分段"""
@@ -91,7 +91,8 @@ class Pipeline:
             "规则：\n"
             "- 只添加标点和段落分隔，不要修改任何文字内容\n"
             "- 不要增删改任何词语，保持原文字不变\n"
-            "- 段落拆分按话题/语义边界，每段5-12句话为宜，避免过碎\n\n"
+            "- 段落拆分按话题/语义边界，每段5-12句话为宜，避免过碎\n"
+            "- 每段内容连续书写，不要在段落内部换行\n\n"
             "直接输出格式化后的文本，不要任何解释。\n\n"
             f"以下是转写文本：\n\n{text}"
         )

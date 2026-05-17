@@ -10,8 +10,8 @@
 - **语音转文字** — 基于 faster-whisper，本地 GPU 加速，无需联网
 - **标点与分段** — LLM 自动为转写文本添加标点符号并按语义分段
 - **说话人分离** — 可选 whisperX 引擎，区分多人对话并标记发言人
-- **AI 总结** — 兼容 OpenAI 接口（默认 DeepSeek），4 种总结风格可选
-- **多格式输出** — 转写和总结可同时输出 `.md` `.txt` `.html`
+- **AI 总结** — 兼容 OpenAI 接口（默认 DeepSeek），4 种总结风格，强调洞察提炼和原文亮点保留
+- **多格式输出** — 转写和总结可同时输出 `.md` `.txt` `.html`，HTML 支持暗色模式、TOC 导航
 - **播放列表** — 支持 B站合集、YouTube 播放列表等批量处理
 - **断点续跑** — 中断后重新运行自动跳过已完成步骤
 - **跨平台** — Windows / Mac / Linux
@@ -157,10 +157,10 @@ output/
 
 | 风格 | CLI 参数 | 说明 |
 |------|---------|------|
-| 全面总结 | `auto` | 完整总结：核心主题、主要观点、关键结论（默认） |
-| 知识点提取 | `knowledge_points` | 提取全部知识点，结构化列出，含概念名称和解释 |
-| 操作步骤 | `steps` | 按顺序提取操作步骤：做什么、怎么做、注意事项 |
-| 核心观点 | `core_ideas` | 提炼核心思想/观点，按实际内容总结，每条一句话 |
+| 全面总结 | `auto` | 精炼文章式总结：核心观点 → 论证展开 → 关键收获（默认） |
+| 知识点提取 | `knowledge_points` | 结构化列出全部知识点，含概念解释、重要性说明、原文例子 |
+| 操作步骤 | `steps` | 按顺序拆解步骤：做什么、为什么必要、怎么做、常见坑点 |
+| 核心观点 | `core_ideas` | 洞察提炼：拒绝话题罗列，每条都是让人「原来如此」的观点 |
 
 ## 支持的格式
 
@@ -256,6 +256,7 @@ A: 标点由 LLM 自动添加（DeepSeek），如质量不佳可在 `config.yaml
 - [whisperX](https://github.com/m-bain/whisperX) — 说话人分离（可选）
 - [ModelScope](https://modelscope.cn) — 模型下载
 - OpenAI 兼容 API — LLM 标点分段 + AI 总结（默认 DeepSeek）
+- [md2html](https://github.com/haidang1810/md2html) — HTML 输出模板（暗色模式、TOC 侧栏、代码复制）
 - tkinter — 图形界面（Python 内置）
 
 ## 许可

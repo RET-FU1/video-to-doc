@@ -127,7 +127,7 @@ class App:
             style_combo.pack(side="left", padx=(6, 0))
             style_combo.bind("<<ComboboxSelected>>", self._on_style_change)
 
-            self.style_desc = tk.Label(row2, text="— 完整总结：核心主题、主要观点、关键结论",
+            self.style_desc = tk.Label(row2, text="— 精炼文章式：核心观点 → 论证展开 → 关键收获",
                                        font=F["small"], fg=C["muted"], bg=C["card"])
             self.style_desc.pack(side="left", padx=(6, 0))
 
@@ -211,10 +211,10 @@ class App:
 
     def _on_style_change(self, event=None):
         descs = {
-            "全面总结": "— 完整总结：核心主题、主要观点、关键结论",
-            "知识点提取": "— 提取全部知识点，结构化列出，含概念和解释",
-            "操作步骤": "— 按顺序提取操作步骤：做什么、怎么做、注意事项",
-            "核心观点": "— 提炼核心思想/观点，按实际内容总结，每条一句话",
+            "全面总结": "— 精炼文章式：核心观点 → 论证展开 → 关键收获",
+            "知识点提取": "— 结构化知识点：概念解释 + 为何重要 + 原文例子",
+            "操作步骤": "— 步骤拆解：做什么 + 为什么必要 + 怎么做 + 坑点",
+            "核心观点": "— 洞察提炼：拒绝话题罗列，每条都是「原来如此」",
         }
         label = self.style_var.get()
         self.style_desc.configure(text=descs.get(label, ""))
