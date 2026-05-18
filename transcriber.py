@@ -98,7 +98,7 @@ class Transcriber:
         is_audio = ext in self.AUDIO_EXTS
 
         safe_name = sanitize_filename(input_path.stem)
-        transcript_path = output_folder / f"{safe_name}.md"
+        transcript_path = output_folder / f"{safe_name}.txt"
 
         if transcript_path.exists():
             print(f"  已转写: {safe_name}")
@@ -267,7 +267,7 @@ class Transcriber:
 
     def _format_diarized_output(self, result, output_folder, safe_name):
         """将 whisperX 结果格式化为带说话人标签的 Markdown"""
-        transcript_path = output_folder / f"{safe_name}.md"
+        transcript_path = output_folder / f"{safe_name}.txt"
 
         # 合并同一说话人的连续段落
         merged = []

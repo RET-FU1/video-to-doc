@@ -50,7 +50,9 @@ class Pipeline:
         style = self.config.get("summarizer", {}).get("summary_style", "auto")
         folder = video_path.parent
 
-        if (folder / f"{video_path.stem}-总结.md").exists() and get_state(folder) == "done":
+        # 检查是否已完成（按第一个选中格式判断）
+        first_fmt = formats[0] if formats else "md"
+        if (folder / f"{video_path.stem}-总结.{first_fmt}").exists() and get_state(folder) == "done":
             print(f"  已完成，跳过")
             return
 
@@ -60,7 +62,6 @@ class Pipeline:
 
         print("  后处理（标点 + 分段）...")
         transcript_md = self._polish_transcript(transcript_raw)
-        transcript_path.write_text(transcript_md, encoding="utf-8")
         save_formats(transcript_md, folder / video_path.stem, formats, meta=meta)
 
         print("  总结中...")

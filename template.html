@@ -872,6 +872,18 @@
       .toc-mobile-trigger { display: none !important; }
     }
 
+    /* ---- No-TOC fallback: full-width single column ---- */
+    body.no-toc .layout {
+      grid-template-columns: 1fr;
+      max-width: 900px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    body.no-toc .content > p,
+    body.no-toc .content > ul,
+    body.no-toc .content > ol,
+    body.no-toc .content > blockquote { max-width: none; }
+
     /* ============================================================
        REDUCED MOTION (a11y)
        ============================================================ */
@@ -1062,6 +1074,7 @@
       if (!links.length) {
         const toc = document.getElementById("toc");
         if (toc) toc.style.display = "none";
+        document.body.classList.add("no-toc");
         return;
       }
       const map = new Map();
