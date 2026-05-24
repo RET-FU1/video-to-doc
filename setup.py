@@ -94,21 +94,6 @@ def step4_check_ffmpeg():
     print("    Linux:   sudo apt install ffmpeg")
 
 
-def step6_check_diarization():
-    """检查 whisperX（可选）"""
-    print("[6/6] 检查说话人分离支持（可选）...")
-    try:
-        import whisperx
-        print("  whisperX 已安装，说话人分离可用")
-    except ImportError:
-        print("  whisperX 未安装（可选）")
-        print("  如需说话人分离功能:")
-        print("    1. 在 .env 中设置 HF_TOKEN=你的_token")
-        print("    2. pip install whisperx")
-        print("    3. 在 config.yaml 中设置 diarization.enabled: true")
-        print("  注意: whisperX 在 Python 3.12+ 可能有兼容性问题")
-
-
 def step5_check_gpu():
     """检查 GPU / CUDA"""
     print("[5/6] 检查 GPU 加速...")
@@ -120,7 +105,6 @@ def step5_check_gpu():
         if result.returncode == 0:
             gpu_name = result.stdout.strip()
             print(f"  GPU 可用: {gpu_name}")
-            # 验证 cublas 是否可加载
             try:
                 import ctypes
                 ctypes.cdll.LoadLibrary("cublas64_12.dll")
@@ -132,6 +116,21 @@ def step5_check_gpu():
             print("  未检测到 NVIDIA GPU，将使用 CPU 转写")
     except FileNotFoundError:
         print("  未找到 nvidia-smi，将使用 CPU 转写")
+
+
+def step6_check_diarization():
+    """检查说话人分离支持（可选）"""
+    print("[6/6] 检查说话人分离支持（可选）...")
+
+    try:
+        import pyannote.audio
+        print("  pyannote.audio 已安装")
+    except ImportError:
+        print("  说话人分离未安装（可选）")
+        print("  安装命令: pip install pyannote.audio")
+        print("  配置步骤:")
+        print("    1. 在 .env 中设置 HF_TOKEN=你的_token")
+        print("    2. 在 config.yaml 中设置 diarization.enabled: true")
 
 
 def main():

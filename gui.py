@@ -94,13 +94,23 @@ class App:
                            selectcolor=C["card"]).pack(side="left")
 
             self.folder_var = tk.BooleanVar()
-            tk.Checkbutton(row1, text="文件夹模式", variable=self.folder_var,
+            self.folder_cb = tk.Checkbutton(row1, text="文件夹模式", variable=self.folder_var,
                            font=F["body"], bg=C["card"],
                            activebackground=C["card"],
-                           selectcolor=C["card"]).pack(side="left", padx=(12, 0))
+                           selectcolor=C["card"],
+                           command=self._on_folder_toggle)
+            self.folder_cb.pack(side="left", padx=(12, 0))
 
             self.dlonly_var = tk.BooleanVar()
-            tk.Checkbutton(row1, text="仅下载", variable=self.dlonly_var,
+            self.dlonly_cb = tk.Checkbutton(row1, text="仅下载", variable=self.dlonly_var,
+                           font=F["body"], bg=C["card"],
+                           activebackground=C["card"],
+                           selectcolor=C["card"],
+                           command=self._on_dlonly_toggle)
+            self.dlonly_cb.pack(side="left", padx=(12, 0))
+
+            self.diarize_var = tk.BooleanVar()
+            tk.Checkbutton(row1, text="说话人分离", variable=self.diarize_var,
                            font=F["body"], bg=C["card"],
                            activebackground=C["card"],
                            selectcolor=C["card"]).pack(side="left", padx=(12, 0))
@@ -111,12 +121,13 @@ class App:
             tk.Label(row2, text="总结风格：", font=F["body"],
                      fg=C["text"], bg=C["card"]).pack(side="left")
 
-            self.style_labels = ["全面总结", "知识点提取", "操作步骤", "核心观点"]
+            self.style_labels = ["全面总结", "知识点提取", "操作步骤", "核心观点", "专家深度"]
             self.style_map = {
                 "全面总结": "auto",
                 "知识点提取": "knowledge_points",
                 "操作步骤": "steps",
                 "核心观点": "core_ideas",
+                "专家深度": "expert",
             }
 
             self.style_var = tk.StringVar(value="全面总结")
@@ -209,12 +220,21 @@ class App:
         f.pack(fill="x", **pack_kw)
         yield f
 
+    def _on_folder_toggle(self):
+        if self.folder_var.get():
+            self.dlonly_var.set(False)
+
+    def _on_dlonly_toggle(self):
+        if self.dlonly_var.get():
+            self.folder_var.set(False)
+
     def _on_style_change(self, event=None):
         descs = {
             "全面总结": "— 精炼文章式：核心观点 → 论证展开 → 关键收获",
             "知识点提取": "— 结构化知识点：概念解释 + 为何重要 + 原文例子",
             "操作步骤": "— 步骤拆解：做什么 + 为什么必要 + 怎么做 + 坑点",
             "核心观点": "— 洞察提炼：拒绝话题罗列，每条都是「原来如此」",
+            "专家深度": "— 世界级专家视角，自我核查事实，锐利批判思维",
         }
         label = self.style_var.get()
         self.style_desc.configure(text=descs.get(label, ""))
@@ -314,6 +334,9 @@ class App:
                 style_eng = self.style_map.get(self.style_var.get(), "auto")
                 cmd.extend(["--summary-style", style_eng])
                 cmd.extend(["--output-formats", ",".join(formats)])
+
+                if self.diarize_var.get():
+                    cmd.append("--diarize")
 
                 self._process = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

@@ -224,13 +224,6 @@ def md_to_html(md_text, title=None, source_file=None, date=None):
     return html
 
 
-CONVERTERS = {
-    "md": None,
-    "txt": md_to_txt,
-    "html": md_to_html,
-}
-
-
 def save_formats(md_text, base_path, formats, meta=None):
     """根据选中的格式保存文件，返回保存的文件路径列表"""
     if meta is None:

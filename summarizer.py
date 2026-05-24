@@ -3,7 +3,6 @@
 支持 OpenAI 兼容 API（DeepSeek、智谱、通义千问、月之暗面等国内服务商）
 支持长文本自动分段总结 + 汇总
 """
-import copy
 import logging
 import time
 from typing import Any, Dict, Optional
@@ -35,8 +34,7 @@ class OpenAICompatSummarizer:
             "要求：\n"
             "- 先一句话概括核心观点，再展开主要论证和论据，最后总结关键收获\n"
             "- 保留原文中精彩的比喻、案例、数据，它们是让总结生动的关键\n"
-            "- 体现出内容之间的逻辑链条，让读者理解「为什么」而不仅是「是什么」\n"
-            
+            "- 体现出内容之间的逻辑链条，让读者理解「为什么」而不仅是「是什么」"
         ),
         "knowledge_points": (
             "请提取视频中的全部知识点，以结构化方式列出。每条知识点包括：\n"
@@ -59,6 +57,35 @@ class OpenAICompatSummarizer:
             "- 保留原文中生动的表达方式，不要改成干巴巴的术语\n"
             "- 按重要性排序，最有洞察力的放在最前面"
         ),
+        "expert": (
+            "你是一位世界级的全能专家。你的智力水平、知识广度、深邃的思考过程与博学程度，与最顶尖的人不相上下。\n"
+            "请以完整、详尽、具体的标准来分析视频内容。\n"
+            "\n"
+            "分析准则：\n"
+            "- 逐步消化视频内容后用自己的理解重新组织，绝不逐段复述\n"
+            "- 自我核查所有事实、数据、名称、日期——对关键信息进行双重检查\n"
+            "- 绝不虚构或捏造任何内容；如果某处无法确定或视频中未明确，直接说明，不要含糊带过\n"
+            "- 不要盲信视频中给出的数字；先用自己的知识独立验证其合理性\n"
+            "- 对每个关键论断明确标注置信度（高/中/低/未知）\n"
+            "- 尽可能使分析长而详细\n"
+            "\n"
+            "批判准则：\n"
+            "- 在认可视频观点之前，先构建最强有力的反驳论点——主动寻找论证中的薄弱环节\n"
+            "- 如果视频的论证有漏洞或事实错误，立即指出，不为视频作者留余地\n"
+            "- 如果视频的结论经不起推敲，坚持你的判断，不因其立场或情绪而让步\n"
+            "- 得出负面结论或指出视频质量低下完全没问题——传递坏消息是你的职责\n"
+            "- 不被视频的立场裹挟，拒绝为政治正确而粉饰问题\n"
+            "\n"
+            "语气准则：\n"
+            "- 精准、锐利，但不尖锐或迂腐\n"
+            "- 你的分析可以而且应该具有挑战性、争论性和针对性——你是在做独立批判，不是在写赞美信\n"
+            "- 不要附加免责声明，不要提及道德伦理，不要使用「值得学习」「值得关注」等说教措辞\n"
+            "- 不必在意视频作者的感受或礼节——对内容不对人\n"
+            "- 不使用「好问题」「有趣的视角」「讲得很好」等空洞称赞\n"
+            "- 永远不为指出问题而道歉\n"
+            "\n"
+            "准确性是唯一成功标准，不是视频作者的认可。"
+        ),
     }
 
     def __init__(self, config: Dict[str, Any]) -> None:
@@ -68,6 +95,7 @@ class OpenAICompatSummarizer:
         self.model: str = self.config.get("model", "deepseek-chat")
         self.max_chunk: int = int(self.config.get("max_chunk_chars", 80000))
         self.max_tokens: int = int(self.config.get("max_tokens", 4096))
+        self.polish_model: str = self.config.get("polish_model", "")
         self._timeout: float = float(self.config.get("timeout", 300))
         self._max_retries: int = int(self.config.get("max_retries", 3))
 
@@ -86,15 +114,17 @@ class OpenAICompatSummarizer:
 
         return self._summarize_long(text, meta, prompt_instruction)
 
-    def _call_api(self, messages: list, max_tokens: Optional[int] = None) -> str:
+    def _call_api(self, messages: list, max_tokens: Optional[int] = None,
+                  timeout: Optional[float] = None, model: Optional[str] = None) -> str:
         """带重试的 API 调用"""
         last_exc: Optional[Exception] = None
         for attempt in range(self._max_retries):
             try:
                 response = self.client.chat.completions.create(
-                    model=self.model,
+                    model=model or self.model,
                     max_tokens=max_tokens or self.max_tokens,
                     messages=messages,
+                    timeout=timeout or self._timeout,
                 )
                 content: Optional[str] = response.choices[0].message.content
                 return content or ""
@@ -110,20 +140,12 @@ class OpenAICompatSummarizer:
 
     def _summarize_chunk(self, text: str, meta: Dict[str, Any], prompt_instruction: str) -> str:
         system_prompt = (
-            "你是一位世界级全能专家。你的智力水平、知识广度与思辨深度，"
-            "与各领域最顶尖的人才不相上下。"
-            "你的任务是基于视频转写文本，撰写一份完整、详尽、有深度的总结。\n\n"
+            "你是一位专业的文档整理助手。你的任务是基于视频转写文本撰写总结。\n\n"
             "核心准则：\n"
-            "- 逐步消化内容后重新组织，用自己的理解输出，绝不逐段复述\n"
-            "- 保留原文中精彩的比喻、案例、数据——它们比概括性描述更有说服力\n"
+            "- 忠于原文内容，不虚构、不编造任何信息\n"
+            "- 保留原文中精彩的比喻、案例、数据\n"
             "- 体现内容之间的逻辑链条，让读者理解「为什么」而不仅是「是什么」\n"
-            "- 对反常识或令人意外的观点，要突出强调并审视其论证是否站得住脚\n"
-            "- 自我核查所有事实、数据、名称、日期——绝不虚构或编造任何内容\n"
-            "- 对不确定的信息，明确标注置信度（高/中/低/未知）\n\n"
-            "输出要求：\n"
-            "- 精准、锐利，不回避质疑视频中的观点——如果某个论证有漏洞，直接指出\n"
-            "- 绝不使用「好问题」「你说得对」「有趣」等空洞赞美\n"
-            "- 准确性是唯一成功标准，不需要取悦任何人\n\n"
+            "- 对不确定的信息明确标注置信度\n\n"
             "使用 Markdown 格式输出。"
         )
 
@@ -175,15 +197,31 @@ class OpenAICompatSummarizer:
         )
         return self._summarize_chunk(combined, meta, merge_instruction)
 
-
-class OllamaSummarizer(OpenAICompatSummarizer):
-    """Ollama 本地模型总结器"""
-
-    def __init__(self, config: Dict[str, Any]) -> None:
-        config = copy.deepcopy(config)
-        config.setdefault("summarizer", {})["base_url"] = \
-            config.get("summarizer", {}).get("base_url", "http://localhost:11434/v1")
-        super().__init__(config)
+    def polish(self, text: str) -> str:
+        """为转写文本添加标点并分段，使用 polish_model（若配置则独立，否则复用主模型）"""
+        model = self.polish_model or self.model
+        prompt = (
+            "你是一个中文文本格式化助手。请对以下语音转写文本做两件事：\n"
+            "1. 添加合适的标点符号（逗号、句号、问号等）\n"
+            "2. 按语义将文本拆分为合适的段落（用空行分隔）\n\n"
+            "提示：文本中每个换行代表语音识别的一个片段边界（自然停顿点），"
+            "可利用这些边界判断句子和段落的起止。\n\n"
+            "规则：\n"
+            "- 只添加标点和段落分隔，不要修改任何文字内容\n"
+            "- 不要增删改任何词语，保持原文字不变\n"
+            "- 连续多个短片段通常属于同一段落，应合并书写\n"
+            "- 每段5-12句话为宜，段落间用空行分隔\n"
+            "- 每段内容连续书写，不要在段落内部额外换行\n\n"
+            "直接输出格式化后的文本，不要任何解释。\n\n"
+            f"以下是转写文本：\n\n{text}"
+        )
+        content = self._call_api(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=16384,
+            timeout=120,
+            model=model,
+        )
+        return content or text
 
 
 def create_summarizer(config: Dict[str, Any]) -> OpenAICompatSummarizer:
@@ -192,9 +230,12 @@ def create_summarizer(config: Dict[str, Any]) -> OpenAICompatSummarizer:
 
     provider: str = config.get("summarizer", {}).get("provider", "openai")
 
-    if provider == "openai":
-        return OpenAICompatSummarizer(config)
     if provider == "ollama":
-        return OllamaSummarizer(config)
+        config.setdefault("summarizer", {}).setdefault(
+            "base_url", "http://localhost:11434/v1"
+        )
+
+    if provider in ("openai", "ollama"):
+        return OpenAICompatSummarizer(config)
 
     raise ValueError(f"未知的总结器: {provider}")

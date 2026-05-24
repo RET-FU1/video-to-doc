@@ -2,156 +2,207 @@
 流水线编排器 — 串联下载 → 转写 → 总结
 支持断点续跑：每步完成后记录状态，失败可从中断处继续。
 """
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
 from downloader import Downloader
 from transcriber import Transcriber
 from summarizer import create_summarizer
 from format_converter import save_formats
-from utils import get_state, set_state, split_text
+from utils import get_state, set_state, split_text_with_overlap, MEDIA_EXTS, sanitize_filename
+
+logger = logging.getLogger(__name__)
 
 
 class Pipeline:
-    def __init__(self, config):
-        self.config = config
-        self.output_root = Path(config["output_dir"])
+    def __init__(self, config: Dict[str, Any]) -> None:
+        self.config: Dict[str, Any] = config
+        self.output_root: Path = Path(config["output_dir"])
         self.output_root.mkdir(parents=True, exist_ok=True)
-        self.downloader = Downloader(config, self.output_root)
-        self.transcriber = Transcriber(config, self.output_root)
+        self.downloader: Downloader = Downloader(config, self.output_root)
+        self.transcriber: Transcriber = Transcriber(config, self.output_root)
         self.summarizer = create_summarizer(config)
 
-    def process(self, url, is_playlist=False):
+    def process(self, url: str, is_playlist: bool = False) -> Path:
         if is_playlist:
             return self._process_playlist(url)
         return self._process_single(url)
 
-    def download_only(self, url, is_playlist=False):
+    def download_only(self, url: str, is_playlist: bool = False) -> None:
         """仅下载，不做转写和总结"""
         if is_playlist:
-            print("\n[仅下载 - 播放列表]")
+            logger.info("[仅下载 - 播放列表]")
             results = self.downloader.download_playlist(url)
-            print(f"\n下载完成! 共 {len(results)} 个视频")
+            logger.info("下载完成! 共 %d 个视频", len(results))
             for video_path, meta in results:
-                print(f"  {video_path}")
+                logger.info("  %s", video_path)
             return
 
-        print("\n[仅下载]")
+        logger.info("[仅下载]")
         video_path, meta = self.downloader.download(url)
-        print(f"\n下载完成! {video_path}")
+        logger.info("下载完成! %s", video_path)
 
-    def _process_single(self, url, output_subdir=None):
-        print("\n[1/3] 下载视频...")
+    def _process_single(self, url: str, output_subdir: Optional[str] = None) -> Path:
+        logger.info("[1/3] 下载视频...")
         video_path, meta = self.downloader.download(url, output_subdir)
         self._process_one(video_path, meta)
         return video_path.parent
 
-    def _process_one(self, video_path, meta):
+    def _process_one(self, video_path: Path, meta: Dict[str, Any]) -> None:
         """单个视频/音频的转写→抛光→总结"""
-        formats = self.config.get("summarizer", {}).get("output_formats", ["md"])
-        style = self.config.get("summarizer", {}).get("summary_style", "auto")
-        folder = video_path.parent
+        formats: List[str] = self.config.get("summarizer", {}).get("output_formats", ["md"])
+        style: str = self.config.get("summarizer", {}).get("summary_style", "auto")
+        folder: Path = video_path.parent
 
-        # 检查是否已完成（按第一个选中格式判断）
-        first_fmt = formats[0] if formats else "md"
+        first_fmt: str = formats[0] if formats else "md"
         if (folder / f"{video_path.stem}-总结.{first_fmt}").exists() and get_state(folder) == "done":
-            print(f"  已完成，跳过")
+            logger.info("已完成，跳过")
             return
 
-        print("  转写中...")
+        logger.info("转写中...")
         transcript_path = self.transcriber.transcribe(video_path, folder)
-        transcript_raw = transcript_path.read_text(encoding="utf-8")
+        transcript_raw: str = transcript_path.read_text(encoding="utf-8")
 
-        print("  后处理（标点 + 分段）...")
-        transcript_md = self._polish_transcript(transcript_raw)
+        logger.info("后处理（标点 + 分段）...")
+        transcript_md: str
+        try:
+            transcript_md = self._polish_transcript(transcript_raw)
+        except Exception as e:
+            logger.warning("抛光失败，使用原始转写文本: %s", e)
+            transcript_md = transcript_raw
         save_formats(transcript_md, folder / video_path.stem, formats, meta=meta)
 
-        print("  总结中...")
-        summary_text = self.summarizer.summarize(transcript_md, meta, style=style)
+        logger.info("总结中...")
+        summary_text: str = self.summarizer.summarize(transcript_md, meta, style=style)
         set_state(folder, "done")
         save_formats(summary_text, folder / f"{video_path.stem}-总结", formats, meta=meta)
 
-    def _polish_transcript(self, raw_text):
-        """用 LLM 为转写文本添加标点并按语义分段"""
-        max_input_chars = 5000
+    def _polish_transcript(self, raw_text: str) -> str:
+        """用 LLM 为转写文本添加标点并按语义分段（并行处理 + 重叠上下文）"""
+        max_input_chars: int = 5000
+        overlap: int = 300
 
         if len(raw_text) <= max_input_chars:
             return self._polish_chunk(raw_text)
 
-        # 长文本分段抛光
-        chunks = split_text(raw_text, max_input_chars, sep="\n")
-        polished = []
-        for i, chunk in enumerate(chunks):
-            print(f"    抛光分段 [{i+1}/{len(chunks)}]...")
-            polished.append(self._polish_chunk(chunk))
-        return "\n\n".join(polished)
+        chunks = split_text_with_overlap(raw_text, max_input_chars, overlap, sep="\n")
+        polished: List[Optional[str]] = [None] * len(chunks)
 
-    def _polish_chunk(self, text):
-        prompt = (
-            "你是一个中文文本格式化助手。请对以下视频转写文本做两件事：\n"
-            "1. 添加合适的标点符号（逗号、句号、问号等）\n"
-            "2. 按语义将文本拆分为合适的段落（用空行分隔）\n\n"
-            "规则：\n"
-            "- 只添加标点和段落分隔，不要修改任何文字内容\n"
-            "- 不要增删改任何词语，保持原文字不变\n"
-            "- 段落拆分按话题/语义边界，每段5-12句话为宜，避免过碎\n"
-            "- 每段内容连续书写，不要在段落内部换行\n\n"
-            "直接输出格式化后的文本，不要任何解释。\n\n"
-            f"以下是转写文本：\n\n{text}"
-        )
+        max_workers = min(4, len(chunks))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._polish_chunk, chunk): i
+                for i, chunk in enumerate(chunks)
+            }
+            for future in as_completed(futures):
+                i = futures[future]
+                try:
+                    polished[i] = future.result()
+                except Exception as e:
+                    logger.warning("分段 %d 抛光失败，使用原文: %s", i + 1, e)
+                    polished[i] = chunks[i]
 
-        response = self.summarizer.client.chat.completions.create(
-            model=self.summarizer.model,
-            max_tokens=16384,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response.choices[0].message.content
+        # 合并：丢弃每块（除第一块外）的第一个段落来去重重叠区域
+        result: str = polished[0] or ""
+        for i in range(1, len(polished)):
+            chunk = polished[i] or ""
+            parts = chunk.split("\n\n", 1)
+            result += "\n\n" + (parts[1] if len(parts) > 1 else chunk)
 
-    def _process_playlist(self, url):
-        print("\n[播放列表模式]")
-        results = self.downloader.download_playlist(url)
+        return result
+
+    def _polish_chunk(self, text: str) -> str:
+        try:
+            return self.summarizer.polish(text)
+        except Exception as e:
+            logger.warning("抛光失败，使用原文: %s", e)
+            return text
+
+    def _process_playlist(self, url: str) -> Path:
+        logger.info("[播放列表模式]")
+        results: List[Tuple[Path, Dict[str, Any]]] = self.downloader.download_playlist(url)
 
         for video_path, meta in results:
-            print(f"\n--- {meta.get('title', video_path.stem)} ---")
+            logger.info("--- %s ---", meta.get('title', video_path.stem))
             try:
                 self._process_one(video_path, meta)
             except Exception as e:
-                print(f"  [FAIL] {e}")
+                logger.error("[FAIL] %s", e)
                 continue
 
-        print(f"\n全部完成! 输出目录: {self.output_root}")
+        if results:
+            group_dir: Path = results[0][0].parent.parent
+            self._collect_outputs(group_dir)
 
-    def process_folder(self, folder_path):
+        logger.info("全部完成! 输出目录: %s", self.output_root)
+        return self.output_root
+
+    def process_folder(self, folder_path: str) -> None:
         """批量处理文件夹内所有视频/音频"""
-        from utils import sanitize_filename
-
-        folder = Path(folder_path).resolve()
+        folder: Path = Path(folder_path).resolve()
         if not folder.is_dir():
             raise NotADirectoryError(f"路径不存在或不是文件夹: {folder_path}")
 
-        video_exts = {".mp4", ".mkv", ".webm", ".flv", ".avi", ".mov",
-                       ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".opus", ".wma"}
-        files = sorted(
+        files: List[Path] = sorted(
             f for f in folder.iterdir()
-            if f.is_file() and f.suffix.lower() in video_exts
+            if f.is_file() and f.suffix.lower() in MEDIA_EXTS
         )
         if not files:
-            print(f"  文件夹内未找到视频/音频文件: {folder}")
+            logger.warning("文件夹内未找到视频/音频文件: %s", folder)
             return
 
-        group_name = sanitize_filename(folder.name)
-        print(f"\n[文件夹模式] 共发现 {len(files)} 个文件 → 输出: {self.output_root / group_name}")
+        group_name: str = sanitize_filename(folder.name)
+        logger.info("[文件夹模式] 共发现 %d 个文件 → 输出: %s", len(files), self.output_root / group_name)
 
         for i, file_path in enumerate(files):
-            print(f"\n--- [{i+1}/{len(files)}] {file_path.stem} ---")
+            logger.info("--- [%d/%d] %s ---", i + 1, len(files), file_path.stem)
             try:
                 video_path, meta = self.downloader._import_local(str(file_path), output_subdir=group_name)
             except Exception as e:
-                print(f"  [FAIL] 导入失败: {e}")
+                logger.error("[FAIL] 导入失败: %s", e)
                 continue
 
             try:
                 self._process_one(video_path, meta)
             except Exception as e:
-                print(f"  [FAIL] {e}")
+                logger.error("[FAIL] %s", e)
                 continue
 
-        print(f"\n全部完成! 输出目录: {self.output_root}")
+        self._collect_outputs(self.output_root / group_name)
+        logger.info("全部完成! 输出目录: %s", self.output_root)
+
+    def _collect_outputs(self, group_dir: Path) -> None:
+        """将批量处理的所有转写和总结分别收集到汇总文件夹"""
+        import shutil
+
+        formats: List[str] = self.config.get("summarizer", {}).get("output_formats", ["md"])
+        exts = set(f".{f}" for f in formats)
+
+        transcript_dir = group_dir / "转写汇总"
+        summary_dir = group_dir / "总结汇总"
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        summary_dir.mkdir(parents=True, exist_ok=True)
+
+        count_t, count_s = 0, 0
+        for subdir in sorted(group_dir.iterdir()):
+            if not subdir.is_dir():
+                continue
+            if subdir.name in ("转写汇总", "总结汇总"):
+                continue
+
+            for file in sorted(subdir.iterdir()):
+                if not file.is_file() or file.suffix not in exts:
+                    continue
+                if file.stem.endswith("-总结"):
+                    shutil.copy2(file, summary_dir / file.name)
+                    count_s += 1
+                else:
+                    shutil.copy2(file, transcript_dir / file.name)
+                    count_t += 1
+
+        if count_t > 0:
+            logger.info("转写汇总: %d 个文件 → %s", count_t, transcript_dir)
+        if count_s > 0:
+            logger.info("总结汇总: %d 个文件 → %s", count_s, summary_dir)

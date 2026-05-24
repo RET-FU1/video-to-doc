@@ -6,7 +6,7 @@ Video-to-Doc 是一键视频/音频转文档工具：下载 → Whisper 语音�
 
 - **入口**: `main.py`（CLI）、`gui.py`（tkinter 图形界面）
 - **配置**: `config.yaml`（运行时参数）、`.env`（API Key）
-- **依赖**: yt-dlp、faster-whisper、openai、whisperX（可选）
+- **依赖**: yt-dlp、faster-whisper、openai、pyannote.audio（可选）
 - **Python**: 3.10+
 
 ## 核心模块与职责
@@ -17,10 +17,10 @@ Video-to-Doc 是一键视频/音频转文档工具：下载 → Whisper 语音�
 | `gui.py` | tkinter 图形界面，多任务队列，subprocess 调用 main.py |
 | `pipeline.py` | **编排器** — 串联下载→转写→抛光→总结，支持断点续跑 |
 | `downloader.py` | yt-dlp 封装，在线下载 + 本地文件导入 |
-| `transcriber.py` | faster-whisper 语音转文字 + 可选 whisperX 说话人分离 |
-| `summarizer.py` | OpenAI 兼容 API 总结器，4 种风格，长文本自动分段+汇总 |
+| `transcriber.py` | faster-whisper 语音转文字 + 可选 pyannote 说话人分离 |
+| `summarizer.py` | OpenAI 兼容 API 总结器，5 种风格，长文本自动分段+汇总，含 polish() 标点分段 |
 | `format_converter.py` | Markdown → txt/html 转换，html 基于 md2html 模板 |
-| `utils.py` | 文件名清理、ffmpeg 查找、venv 路径、断点状态管理、文本分段 |
+| `utils.py` | 文件名清理、ffmpeg 查找、venv 路径、断点状态管理、文本分段（含带重叠的切分） |
 | `template.html` | md2html 模板（CSS/JS），暗色模式、TOC 导航、代码复制 |
 | `config.yaml` | 默认配置（Whisper 参数、API 设置、输出格式等） |
 | `.env` | API Key（`API_KEY=sk-xxx`），不入 git |
@@ -31,10 +31,11 @@ Video-to-Doc 是一键视频/音频转文档工具：下载 → Whisper 语音�
 URL/本地文件
   → Downloader.download()      → {标题}.mp4 + meta
   → Transcriber.transcribe()   → {标题}.txt（原始转写）
-  → Pipeline._polish_transcript() → LLM 标点+分段
+  → Pipeline._polish_transcript() → LLM 标点+分段（并行 + 重叠上下文）
   → save_formats(转写, formats)   → {标题}.md/html/txt
   → Summarizer.summarize()     → 总结文本（Markdown）
   → save_formats(总结, formats)   → {标题}-总结.md/html/txt
+  → Pipeline._collect_outputs()   → 转写汇总/ + 总结汇总/（仅批量模式）
 ```
 
 每步完成后记录状态到 `.pipeline_state`，中断后可从断点继续。
@@ -43,21 +44,24 @@ URL/本地文件
 
 ### 输出结构
 - 单视频: `output/{标题}/{标题}.{fmt}` + `{标题}-总结.{fmt}`
-- 播放列表/文件夹: `output/{合集名}/{视频标题}/...`
+- 播放列表/文件夹: `output/{合集名}/{视频标题}/...` + `转写汇总/` + `总结汇总/`
 - 原始转写中间文件统一为 `.txt`（非用户输出）
 - 最终输出格式由用户选择（md/txt/html），通过 `save_formats()` 统一生成
 
 ### 转写
 - 模型: `faster-whisper-large-v3-turbo`，GPU CUDA/float16，回退 CPU/int8
-- 语言: `config.yaml` → `whisper.language`（默认 zh）
+- 语言: `config.yaml` → `whisper.language`（默认 auto 自动检测）
 - 输出: 无标点的纯文本片段，标点和分段交给 LLM 后处理
-- 说话人分离: `diarization.enabled: true` + whisperX + HF_TOKEN
+- 说话人分离: `diarization.enabled: true` + pyannote.audio + HF_TOKEN
+- 音频提取: `_ensure_audio()` 上下文管理器统一处理，自动清理临时文件
+- 前置检查: `_preflight_diarization()` 在真正处理前检查 HF_TOKEN 和模型授权状态
 
 ### 总结
 - Provider: OpenAI 兼容接口（默认 DeepSeek `deepseek-v4-pro`）
-- 4 种风格: `auto` / `knowledge_points` / `steps` / `core_ideas`
+- 5 种风格: `auto` / `knowledge_points` / `steps` / `core_ideas` / `expert`
 - 长文本: 超过 `max_chunk_chars`（80000）自动分段总结后汇总
-- 抛光: 每 5000 字符一段调用 LLM 添加标点+分段
+- 抛光: `polish()` 方法调用 LLM 添加标点+分段；大文本自动切分 + 并行处理（ThreadPoolExecutor 最多 4 并发）+ 重叠上下文（300 字符）避免边界标点错误
+- 独立抛光模型: `polish_model` 配置项可指定便宜模型（如 flash），留空则复用主模型
 
 ### HTML 模板
 - `template.html` 来自 md2html 项目，使用 `{{PLACEHOLDER}}` 占位符

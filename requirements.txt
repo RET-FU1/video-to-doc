@@ -5,4 +5,4 @@ pyyaml>=6.0
 modelscope>=1.0.0
 nvidia-cublas-cu12>=12.0.0
 nvidia-cuda-runtime-cu12>=12.0.0
-# whisperx  # 可选：说话人分离功能需手动 pip install whisperx（注意 Python 3.12+ 可能有兼容问题）
+# pyannote.audio  # 可选：说话人分离

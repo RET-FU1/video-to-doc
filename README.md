@@ -9,8 +9,8 @@
 - **本地文件** — 支持本地视频/音频文件，也支持整个文件夹批量处理
 - **语音转文字** — 基于 faster-whisper，本地 GPU 加速，无需联网
 - **标点与分段** — LLM 自动为转写文本添加标点符号并按语义分段
-- **说话人分离** — 可选 whisperX 引擎，区分多人对话并标记发言人
-- **AI 总结** — 兼容 OpenAI 接口（默认 DeepSeek），4 种总结风格，以世界级专家视角输出有判断力的深度分析，不编造、不逢迎
+- **说话人分离** — 可选 pyannote.audio，区分多人对话并标记发言人
+- **AI 总结** — 兼容 OpenAI 接口（默认 DeepSeek），5 种总结风格，强调准确性，忠于原文不编造
 - **多格式输出** — 转写和总结可按需输出 `.md` `.txt` `.html`，HTML 支持暗色模式、TOC 导航、自适应全宽
 - **播放列表** — 支持 B站合集、YouTube 播放列表等批量处理
 - **断点续跑** — 中断后重新运行自动跳过已完成步骤
@@ -83,7 +83,7 @@ venv\Scripts\python gui.py  # Windows
 
 GUI 操作：
 - 输入框填写视频链接、本地文件路径或文件夹路径（每行一个）
-- 勾选模式：播放列表/合集、文件夹模式、仅下载
+- 勾选模式：播放列表/合集、文件夹模式、仅下载、说话人分离
 - 选择总结风格和输出格式
 - 点"开始处理"，日志区实时显示进度
 - 点"打开输出目录"查看结果
@@ -118,6 +118,9 @@ python main.py "https://example.com/video" --summary-style knowledge_points
 
 # 指定输出格式
 python main.py "https://example.com/video" --output-formats md,txt,html
+
+# 启用说话人分离
+python main.py "https://example.com/video" --diarize
 ```
 
 ## 输出结构
@@ -147,7 +150,12 @@ output/
     │   └── ...
     ├── {视频2标题}/
     │   └── ...
-    └── ...
+    ├── 转写汇总/          # 所有视频的转写文件集中于此
+    │   ├── {视频1标题}.md
+    │   └── {视频2标题}.md
+    └── 总结汇总/          # 所有视频的总结文件集中于此
+        ├── {视频1标题}-总结.md
+        └── {视频2标题}-总结.md
 ```
 
 所有文件均以视频标题命名，可直接拷贝汇总管理而不会重名覆盖。
@@ -160,6 +168,7 @@ output/
 | 知识点提取 | `knowledge_points` | 结构化列出全部知识点，含概念解释、重要性说明、原文例子 |
 | 操作步骤 | `steps` | 按顺序拆解步骤：做什么、为什么必要、怎么做、常见坑点 |
 | 核心观点 | `core_ideas` | 洞察提炼：拒绝话题罗列，每条都是让人「原来如此」的观点 |
+| 专家深度 | `expert` | 世界级专家视角，自我核查事实，锐利批判思维，不编造不逢迎 |
 
 ## 支持的格式
 
@@ -177,14 +186,17 @@ output/
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `output_dir` | 输出目录 | `./output` |
-| `whisper.language` | 转写语言 | `zh` |
+| `whisper.language` | 转写语言 | `auto`（自动检测） |
 | `whisper.device` | 推理设备 | `cuda` |
 | `whisper.compute_type` | 精度 | `float16`（GPU）/ `int8`（CPU） |
 | `summarizer.provider` | API 类型 | `openai` |
 | `summarizer.base_url` | API 地址 | DeepSeek |
 | `summarizer.model` | 模型名 | `deepseek-v4-pro` |
+| `summarizer.polish_model` | 标点分段专用模型，留空复用 model | 空 |
 | `summarizer.max_chunk_chars` | 长文本分段阈值 | `80000` |
 | `summarizer.max_tokens` | 单次回复最大 token | `4096` |
+| `summarizer.timeout` | API 超时（秒） | `300` |
+| `summarizer.max_retries` | API 失败重试次数 | `3` |
 | `summarizer.summary_style` | 默认总结风格 | `auto` |
 | `summarizer.output_formats` | 输出格式 | `[md]` |
 | `diarization.enabled` | 启用说话人分离 | `false` |
@@ -196,22 +208,56 @@ output/
 
 ## 说话人分离（可选）
 
-需要 `pip install whisperx`，并在 `.env` 中配置 HuggingFace Token：
+自动区分多人对话并标记发言人（如 SPEAKER_00、SPEAKER_01）。每个片段附带时间戳。
 
+### 前置条件
+
+说话人分离需要 HuggingFace 账号和 Token。**无需付费**，全程约 3 分钟完成一次性配置。
+
+### 第 1 步：获取 HuggingFace Token
+
+1. 访问 [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) 注册/登录
+2. 点击 **"Create new token"**，类型选 **Read**，名称随意
+3. 复制生成的 token（格式 `hf_xxx...`），写入项目 `.env` 文件：
+   ```
+   HF_TOKEN=hf_xxx
+   ```
+
+### 第 2 步：接受模型用户协议（3 个）
+
+说话人分离依赖 3 个模型，**每个都需要单独在网页上点击"Agree"**：
+
+| 模型 | 授权页面 | 说明 |
+|------|---------|------|
+| speaker-diarization-3.1 | [打开页面](https://huggingface.co/pyannote/speaker-diarization-3.1) | 主说话人分离模型 |
+| segmentation-3.0 | [打开页面](https://huggingface.co/pyannote/segmentation-3.0) | 语音活动检测（VAD） |
+| speaker-diarization-community-1 | [打开页面](https://huggingface.co/pyannote/speaker-diarization-community-1) | 说话人嵌入聚类 |
+
+> 每个页面点击 **"Agree and access repository"** 即可。姓名、机构随意填写，不会被验证。
+
+**注意**：程序启动时会自动检查这 3 个模型的授权状态。未授权时会在日志中给出明确提示和对应链接，不会静默失败。
+
+### 第 3 步：安装依赖
+
+```bash
+pip install pyannote.audio
 ```
-HF_TOKEN=hf_your_token
-```
 
-> 从 [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) 创建 Read token，并先到 [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) 和 [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0) 接受用户协议。
+### 第 4 步：启用
 
-然后在 `config.yaml` 中开启：
+在 `config.yaml` 中：
 
 ```yaml
 diarization:
   enabled: true
+  hf_token: ""              # 留空则从 .env 的 HF_TOKEN 读取
+  min_speakers: 2           # 预估最少说话人数
+  max_speakers: 5           # 预估最多说话人数
 ```
 
-启用后转写文档会按发言人分段标记：
+或在命令行添加 `--diarize` 参数临时启用。
+
+### 输出示例
 
 ```markdown
 # 视频标题
@@ -223,7 +269,22 @@ diarization:
 我来分享一下技术架构的设计思路。
 ```
 
-> **注意：** whisperX 在 Python 3.12+ 可能有依赖冲突，建议 Python 3.10-3.11。
+### 故障排查
+
+**Q: 提示"模型尚未授权"？**
+A: 检查是否遗漏了某个模型的协议（共 3 个，见上表）。日志中会给出具体是哪个模型和授权链接。
+
+**Q: 前置检查失败但转写仍然继续？**
+A: 这是预期行为。说话人分离是可选的增强功能，配置不完整时会自动回退到基础转写，不会影响转写本身。
+
+**Q: 说话人标签为什么是 SPEAKER_00 而非真实人名？**
+A: pyannote 只能区分"不同的人"，无法识别具体身份。要标注真实人名需要提前注册声纹样本（说话人识别），这是另一个领域的功能。
+
+**Q: 两人同时说话能分开吗？**
+A: 不能。重叠语音分离（speech separation）是目前学术界的开放难题，pyannote 不支持。
+
+**Q: 短句或背景噪音大时说话人标错？**
+A: 可尝试调整 `min_speakers` / `max_speakers` 参数。单人视频设 `max_speakers: 1` 可避免过度切分。
 
 ## 常见问题
 
@@ -242,17 +303,14 @@ A: 在 `config.yaml` 中设置 `downloader.cookies_file` 指向浏览器导出�
 **Q: 播放列表只下载了第一个？**
 A: 确保加了 `--playlist` 参数，或在 GUI 中勾选"播放列表/合集"。
 
-**Q: 说话人分离不生效？**
-A: (1) `pip install whisperx` (2) `.env` 中 `HF_TOKEN` 已设置 (3) `config.yaml` 中 `diarization.enabled: true`。任何环节缺失会自动回退基础转写。
-
 **Q: 转写文本标点不准？**
-A: 标点由 LLM 自动添加（DeepSeek），如质量不佳可在 `config.yaml` 中换模型。纯本地转写不含标点。
+A: 标点由 LLM 自动添加，默认使用与总结相同的模型。可在 `config.yaml` 中设置 `summarizer.polish_model` 切换专用模型（推荐 flash 等便宜模型降成本），或更换 `summarizer.model` 提高质量。纯本地转写不含标点。
 
 ## 技术栈
 
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — 视频下载
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — 语音转文字（CTranslate2 推理引擎）
-- [whisperX](https://github.com/m-bain/whisperX) — 说话人分离（可选）
+- [pyannote.audio](https://github.com/pyannote/pyannote-audio) — 说话人分离（可选）
 - [ModelScope](https://modelscope.cn) — 模型下载
 - OpenAI 兼容 API — LLM 标点分段 + AI 总结（默认 DeepSeek）
 - [md2html](https://github.com/haidang1810/md2html) — HTML 输出模板（暗色模式、TOC 侧栏、代码复制）

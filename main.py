@@ -14,21 +14,30 @@ Video-to-Doc — 视频下载、转写、总结一体化工具
   knowledge_points 提取知识点
   steps            提取操作步骤
   core_ideas       提炼核心观点
+  expert           专家深度分析
 """
 import argparse
+import logging
 import sys
-import yaml
 from pathlib import Path
+from typing import Dict, Any
+
+import yaml
 from pipeline import Pipeline
+from utils import setup_logging, validate_config
+
+logger = logging.getLogger(__name__)
 
 
-def load_config():
-    config_path = Path(__file__).parent / "config.yaml"
+def load_config() -> Dict[str, Any]:
+    config_path: Path = Path(__file__).parent / "config.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
-def main():
+def main() -> None:
+    setup_logging()
+
     parser = argparse.ArgumentParser(
         description="Video-to-Doc — 下载视频、转写为文档、AI 总结",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -46,30 +55,38 @@ def main():
     parser.add_argument("--skip-download", action="store_true", help="跳过下载（已有视频文件）")
     parser.add_argument("--download-only", action="store_true", help="仅下载视频，不做转写和总结")
     parser.add_argument("--summary-style", default="auto",
-                        choices=["auto", "knowledge_points", "steps", "core_ideas"],
+                        choices=["auto", "knowledge_points", "steps", "core_ideas", "expert"],
                         help="总结风格 (默认: auto)")
     parser.add_argument("--output-formats", default="md",
                         help="输出格式，逗号分隔: md,txt,html (默认: md)")
+    parser.add_argument("--diarize", action="store_true",
+                        help="启用说话人分离（需安装 pyannote.audio 并配置 HF_TOKEN）")
 
     args = parser.parse_args()
 
-    config = load_config()
+    config: Dict[str, Any] = load_config()
 
-    if "output_dir" not in config:
-        print("[ERROR] config.yaml 缺少必填项 output_dir，请检查配置文件")
+    # 配置校验
+    errors = validate_config(config)
+    if errors:
+        logger.error("config.yaml 配置校验失败:")
+        for err in errors:
+            logger.error("  - %s", err)
         sys.exit(1)
 
     config.setdefault("summarizer", {})["summary_style"] = args.summary_style
     config.setdefault("summarizer", {})["output_formats"] = [
         f.strip() for f in args.output_formats.split(",") if f.strip()
     ]
+    if args.diarize:
+        config.setdefault("diarization", {})["enabled"] = True
 
-    pipeline = Pipeline(config)
+    pipeline: Pipeline = Pipeline(config)
 
     try:
         if args.download_only:
             if args.folder:
-                print("[仅下载] 暂不支持文件夹模式，请逐个下载")
+                logger.error("[仅下载] 暂不支持文件夹模式，请逐个下载")
                 sys.exit(1)
             pipeline.download_only(args.url, is_playlist=args.playlist)
         elif args.folder:
@@ -79,10 +96,10 @@ def main():
         else:
             parser.error("必须提供 URL 或 --folder 参数")
     except KeyboardInterrupt:
-        print("\n\n用户中断。断点续跑机制已保留进度，再次运行可继续。")
+        logger.info("用户中断。断点续跑机制已保留进度，再次运行可继续。")
         sys.exit(0)
     except Exception as e:
-        print(f"\n[ERROR] {e}")
+        logger.error("%s", e)
         sys.exit(1)
 
 
