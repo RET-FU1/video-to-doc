@@ -20,8 +20,7 @@ summarizer:
                                   # 通义千问:     https://dashscope.aliyuncs.com/compatible-mode/v1
                                   # 月之暗面:     https://api.moonshot.cn/v1
   model: deepseek-v4-pro         # DeepSeek: deepseek-v4-pro / deepseek-v4-flash
-  polish_model: ""               # 标点分段专用模型，留空则复用 model（推荐用 flash 等便宜模型降成本）
-                                  # 智谱: glm-4-flash / 通义: qwen-turbo / 月之暗面: moonshot-v1-8k
+  polish_model: deepseek-v4-flash  # 标点分段专用模型（简单任务推荐用 flash 降成本，留空则复用 model）
   max_chunk_chars: 80000          # 分段阈值（字符数），超过此长度自动分段总结
   max_tokens: 4096               # 单次回复最大 token 数
   summary_style: auto            # auto / knowledge_points / steps / core_ideas / expert

@@ -192,7 +192,7 @@ output/
 | `summarizer.provider` | API 类型 | `openai` |
 | `summarizer.base_url` | API 地址 | DeepSeek |
 | `summarizer.model` | 模型名 | `deepseek-v4-pro` |
-| `summarizer.polish_model` | 标点分段专用模型，留空复用 model | 空 |
+| `summarizer.polish_model` | 标点分段专用模型，留空复用 model | `deepseek-v4-flash` |
 | `summarizer.max_chunk_chars` | 长文本分段阈值 | `80000` |
 | `summarizer.max_tokens` | 单次回复最大 token | `4096` |
 | `summarizer.timeout` | API 超时（秒） | `300` |
