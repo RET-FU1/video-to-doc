@@ -204,11 +204,13 @@ class OpenAICompatSummarizer:
             "你是一个中文文本格式化助手。请对以下语音转写文本做两件事：\n"
             "1. 添加合适的标点符号（逗号、句号、问号等）\n"
             "2. 按语义将文本拆分为合适的段落（用空行分隔）\n\n"
-            "提示：文本中每个换行代表语音识别的一个片段边界（自然停顿点），"
-            "可利用这些边界判断句子和段落的起止。\n\n"
+            "提示：每行开头的 [MM:SS] 是该片段的起始时间。"
+            "时间间隔较大（如 >5 秒）通常意味着话题切换或说话人转换，"
+            "应在该处分段。连续密集的片段通常属于同一段落。\n\n"
             "规则：\n"
             "- 只添加标点和段落分隔，不要修改任何文字内容\n"
             "- 不要增删改任何词语，保持原文字不变\n"
+            "- 输出时去掉行首的 [MM:SS] 时间标记\n"
             "- 连续多个短片段通常属于同一段落，应合并书写\n"
             "- 每段5-12句话为宜，段落间用空行分隔\n"
             "- 每段内容连续书写，不要在段落内部额外换行\n\n"
@@ -231,9 +233,8 @@ def create_summarizer(config: Dict[str, Any]) -> OpenAICompatSummarizer:
     provider: str = config.get("summarizer", {}).get("provider", "openai")
 
     if provider == "ollama":
-        config.setdefault("summarizer", {}).setdefault(
-            "base_url", "http://localhost:11434/v1"
-        )
+        cfg = config.setdefault("summarizer", {})
+        cfg.setdefault("base_url", "http://localhost:11434/v1")
 
     if provider in ("openai", "ollama"):
         return OpenAICompatSummarizer(config)

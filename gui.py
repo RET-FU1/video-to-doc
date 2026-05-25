@@ -1,16 +1,19 @@
 """
 Video-to-Doc 图形界面
 """
+import logging
 import os
-import sys
 import subprocess
+import sys
 import threading
 from contextlib import contextmanager
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from utils import find_venv_executable
+import yaml
+from pipeline import Pipeline
+from utils import load_env, setup_logging
 
 PROJECT_ROOT = Path(__file__).parent
 
@@ -40,14 +43,26 @@ F = {
 }
 
 
+class _GuiLogHandler(logging.Handler):
+    """日志处理器：将 log 消息桥接到 GUI 日志窗口"""
+
+    def __init__(self, app: "App") -> None:
+        super().__init__()
+        self._app = app
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = self.format(record)
+        self._app._log(msg)
+
+
 class App:
     def __init__(self, root):
         self.root = root
         self.root.title("Video-to-Doc")
-        self.root.geometry("680x540")
-        self.root.minsize(500, 400)
+        self.root.geometry("900x780")
+        self.root.minsize(600, 450)
         self.root.configure(bg=C["bg"])
-        self._process = None
+        self._stopped = False
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -88,10 +103,11 @@ class App:
             row1.pack(fill="x", pady=(0, 6))
 
             self.playlist_var = tk.BooleanVar()
-            tk.Checkbutton(row1, text="播放列表/合集", variable=self.playlist_var,
+            self.playlist_cb = tk.Checkbutton(row1, text="播放列表/合集", variable=self.playlist_var,
                            font=F["body"], bg=C["card"],
                            activebackground=C["card"],
-                           selectcolor=C["card"]).pack(side="left")
+                           selectcolor=C["card"])
+            self.playlist_cb.pack(side="left")
 
             self.folder_var = tk.BooleanVar()
             self.folder_cb = tk.Checkbutton(row1, text="文件夹模式", variable=self.folder_var,
@@ -110,10 +126,32 @@ class App:
             self.dlonly_cb.pack(side="left", padx=(12, 0))
 
             self.diarize_var = tk.BooleanVar()
-            tk.Checkbutton(row1, text="说话人分离", variable=self.diarize_var,
+            self.diarize_cb = tk.Checkbutton(row1, text="说话人分离", variable=self.diarize_var,
                            font=F["body"], bg=C["card"],
                            activebackground=C["card"],
-                           selectcolor=C["card"]).pack(side="left", padx=(12, 0))
+                           selectcolor=C["card"])
+            self.diarize_cb.pack(side="left", padx=(12, 0))
+
+            self.translate_var = tk.BooleanVar()
+            self.translate_cb = tk.Checkbutton(row1, text="翻译", variable=self.translate_var,
+                           font=F["body"], bg=C["card"],
+                           activebackground=C["card"],
+                           selectcolor=C["card"])
+            self.translate_cb.pack(side="left", padx=(12, 0))
+
+            self.srt_var = tk.BooleanVar()
+            self.srt_cb = tk.Checkbutton(row1, text="字幕", variable=self.srt_var,
+                           font=F["body"], bg=C["card"],
+                           activebackground=C["card"],
+                           selectcolor=C["card"])
+            self.srt_cb.pack(side="left", padx=(12, 0))
+
+            self.nosummary_var = tk.BooleanVar()
+            self.nosummary_cb = tk.Checkbutton(row1, text="跳过总结", variable=self.nosummary_var,
+                           font=F["body"], bg=C["card"],
+                           activebackground=C["card"],
+                           selectcolor=C["card"])
+            self.nosummary_cb.pack(side="left", padx=(12, 0))
 
             row2 = tk.Frame(card, bg=C["card"])
             row2.pack(fill="x", pady=(0, 6))
@@ -131,12 +169,12 @@ class App:
             }
 
             self.style_var = tk.StringVar(value="全面总结")
-            style_combo = ttk.Combobox(row2, textvariable=self.style_var,
+            self.style_combo = ttk.Combobox(row2, textvariable=self.style_var,
                          values=self.style_labels,
                          state="readonly", width=14,
                          font=F["body"])
-            style_combo.pack(side="left", padx=(6, 0))
-            style_combo.bind("<<ComboboxSelected>>", self._on_style_change)
+            self.style_combo.pack(side="left", padx=(6, 0))
+            self.style_combo.bind("<<ComboboxSelected>>", self._on_style_change)
 
             self.style_desc = tk.Label(row2, text="— 精炼文章式：核心观点 → 论证展开 → 关键收获",
                                        font=F["small"], fg=C["muted"], bg=C["card"])
@@ -150,10 +188,13 @@ class App:
             self.fmt_md = tk.BooleanVar(value=True)
             self.fmt_txt = tk.BooleanVar(value=False)
             self.fmt_html = tk.BooleanVar(value=False)
+            self.fmt_cbs = []
             for v, lb in [(self.fmt_md, ".md"), (self.fmt_txt, ".txt"), (self.fmt_html, ".html")]:
-                tk.Checkbutton(row3, text=lb, variable=v, font=F["body"],
+                cb = tk.Checkbutton(row3, text=lb, variable=v, font=F["body"],
                                bg=C["card"], activebackground=C["card"],
-                               selectcolor=C["card"]).pack(side="left", padx=(12, 0))
+                               selectcolor=C["card"])
+                cb.pack(side="left", padx=(12, 0))
+                self.fmt_cbs.append(cb)
 
         # 按钮行
         btn_row = tk.Frame(main, bg=C["bg"])
@@ -223,10 +264,20 @@ class App:
     def _on_folder_toggle(self):
         if self.folder_var.get():
             self.dlonly_var.set(False)
+            self._on_dlonly_toggle()
 
     def _on_dlonly_toggle(self):
-        if self.dlonly_var.get():
+        dlonly = self.dlonly_var.get()
+        if dlonly:
             self.folder_var.set(False)
+        state = "disabled" if dlonly else "normal"
+        readonly = "disabled" if dlonly else "readonly"
+        for w in (self.folder_cb, self.diarize_cb,
+                  self.translate_cb, self.srt_cb, self.nosummary_cb):
+            w.configure(state=state)
+        self.style_combo.configure(state=readonly)
+        for cb in self.fmt_cbs:
+            cb.configure(state=state)
 
     def _on_style_change(self, event=None):
         descs = {
@@ -299,19 +350,38 @@ class App:
 
     def stop(self):
         self._stopped = True
-        if self._process and self._process.poll() is None:
-            self._process.terminate()
         self._log("\n[WARN] 用户停止")
         self._set_status("已停止")
         self._done()
 
     def _run(self, urls):
+        formats = []
+        if self.fmt_md.get():   formats.append("md")
+        if self.fmt_txt.get():  formats.append("txt")
+        if self.fmt_html.get(): formats.append("html")
+
+        style_eng = self.style_map.get(self.style_var.get(), "auto")
+
+        with open(PROJECT_ROOT / "config.yaml", "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+        load_env()
+
+        summarizer_cfg = config.setdefault("summarizer", {})
+        summarizer_cfg["summary_style"] = style_eng
+        summarizer_cfg["output_formats"] = formats
+        if self.diarize_var.get():
+            config.setdefault("diarization", {})["enabled"] = True
+
+        # 注入 GUI 日志 handler
+        handler = _GuiLogHandler(self)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        root_logger = logging.getLogger()
+        root_logger.addHandler(handler)
         try:
-            python = find_venv_executable("python")
-            formats = []
-            if self.fmt_md.get():   formats.append("md")
-            if self.fmt_txt.get():  formats.append("txt")
-            if self.fmt_html.get(): formats.append("html")
+            pipeline = Pipeline(config,
+                                translate=self.translate_var.get(),
+                                srt=self.srt_var.get(),
+                                skip_summary=self.nosummary_var.get())
 
             for i, url in enumerate(urls):
                 if self._stopped:
@@ -319,46 +389,27 @@ class App:
                 self._set_status(f"处理中 ({i+1}/{len(urls)})")
                 self._log(f"\n[{i+1}/{len(urls)}] {url}")
 
-                cmd = [python, "-u", str(PROJECT_ROOT / "main.py")]
+                try:
+                    if self.dlonly_var.get():
+                        pipeline.download_only(url, is_playlist=self.playlist_var.get())
+                    elif self.folder_var.get():
+                        pipeline.process_folder(url)
+                    elif self.playlist_var.get():
+                        pipeline.process(url, is_playlist=True)
+                    else:
+                        pipeline.process(url)
+                except Exception as e:
+                    self._log(f"  [错误] {e}")
 
-                if self.dlonly_var.get():
-                    cmd.append("--download-only")
-
-                if self.folder_var.get():
-                    cmd.extend(["--folder", url])
-                else:
-                    cmd.append(url)
-                    if self.playlist_var.get():
-                        cmd.append("--playlist")
-
-                style_eng = self.style_map.get(self.style_var.get(), "auto")
-                cmd.extend(["--summary-style", style_eng])
-                cmd.extend(["--output-formats", ",".join(formats)])
-
-                if self.diarize_var.get():
-                    cmd.append("--diarize")
-
-                self._process = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, cwd=str(PROJECT_ROOT),
-                )
-
-                for line in self._process.stdout:
-                    line = line.strip()
-                    if line:
-                        self.root.after(0, lambda t=line: self._log(t))
-
-                self._process.wait()
-                if self._process.returncode != 0:
-                    self._log(f"  [错误] 处理失败 (退出码 {self._process.returncode})")
-
-            self._log("\n全部完成!")
-            self._set_status("完成")
+            if not self._stopped:
+                self._log("\n全部完成!")
+                self._set_status("完成")
 
         except Exception as e:
             self._log(f"异常: {e}")
             self._set_status("出错")
         finally:
+            root_logger.removeHandler(handler)
             self.root.after(0, self._done)
 
     def _done(self):
@@ -380,6 +431,7 @@ class App:
 
 
 def main():
+    setup_logging()
     root = tk.Tk()
     App(root)
     root.mainloop()

@@ -20,7 +20,7 @@ summarizer:
                                   # 通义千问:     https://dashscope.aliyuncs.com/compatible-mode/v1
                                   # 月之暗面:     https://api.moonshot.cn/v1
   model: deepseek-v4-pro         # DeepSeek: deepseek-v4-pro / deepseek-v4-flash
-  polish_model: deepseek-v4-flash  # 标点分段专用模型（简单任务推荐用 flash 降成本，留空则复用 model）
+  polish_model: deepseek-v4-flash   # 标点分段专用模型（留空复用 model；若指定则需在当前服务商存在）
   max_chunk_chars: 80000          # 分段阈值（字符数），超过此长度自动分段总结
   max_tokens: 4096               # 单次回复最大 token 数
   summary_style: auto            # auto / knowledge_points / steps / core_ideas / expert
@@ -35,6 +35,10 @@ diarization:
   hf_token: ""                   # HuggingFace Token，也支持 .env 中 HF_TOKEN
   min_speakers: 2                # 预估最少说话人数
   max_speakers: 5                # 预估最多说话人数
+
+# 翻译（可选，用于外文视频输出汉化文档和字幕）
+translation:
+  target_lang: zh               # 目标语言，zh=中文，en=英文，ja=日文等
 
 # 下载设置
 downloader:

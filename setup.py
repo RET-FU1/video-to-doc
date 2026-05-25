@@ -62,7 +62,7 @@ def step2_install_deps():
 
 
 def step3_download_model():
-    """提示用户手动下载 Whisper 模型"""
+    """下载 Whisper 模型（约 1.6GB）"""
     model_dir = MODEL_CACHE / "pengzhendong" / "faster-whisper-large-v3-turbo"
     if model_dir.exists() and any(
         f.suffix == ".bin" for f in model_dir.iterdir()
@@ -71,13 +71,19 @@ def step3_download_model():
         return
 
     python = get_python()
-    print(f"[3/6] 模型尚未下载（约 1.6GB）")
+    print("[3/6] 下载 Whisper 模型（约 1.6GB，首次运行）...")
+    print("  请耐心等待，下载进度实时显示...")
     print()
-    print("  请在终端中运行以下命令下载模型：")
-    print(f"    {python} download_model.py")
-    print()
-    print("  （Claude Code 终端有 10 分钟超时限制，需在系统终端中运行）")
-    print("  下载完成后重新运行 python setup.py 验证。")
+
+    try:
+        subprocess.run(
+            [python, str(PROJECT_ROOT / "download_model.py")],
+            check=True,
+        )
+    except subprocess.CalledProcessError:
+        print("\n[WARN] 模型下载失败，可稍后手动运行:")
+        print(f"  {python} download_model.py                       # ModelScope（国内快）")
+        print(f"  {python} download_model.py --source huggingface  # HuggingFace")
 
 
 def step4_check_ffmpeg():
@@ -106,9 +112,12 @@ def step5_check_gpu():
             gpu_name = result.stdout.strip()
             print(f"  GPU 可用: {gpu_name}")
             try:
-                import ctypes
-                ctypes.cdll.LoadLibrary("cublas64_12.dll")
-                print("  cuBLAS 已就绪，GPU 加速可用")
+                from utils import init_cuda, cublas_available
+                init_cuda()
+                if cublas_available():
+                    print("  cuBLAS 已就绪，GPU 加速可用")
+                else:
+                    raise OSError("cuBLAS not found")
             except OSError:
                 print("  [WARN] cuBLAS 未找到，将使用 CPU 转写")
                 print("  如需 GPU 加速，请确保已安装 CUDA Toolkit 或 pip install nvidia-cublas-cu12")
@@ -149,6 +158,16 @@ def main():
     except subprocess.CalledProcessError as e:
         print(f"\n[ERROR] 步骤失败: {e}")
         sys.exit(1)
+
+    # 自动复制 .env（若不存在）
+    env_file = PROJECT_ROOT / ".env"
+    env_example = PROJECT_ROOT / ".env.example"
+    if not env_file.exists() and env_example.exists():
+        shutil.copy(env_example, env_file)
+        print()
+        print("[!] 已从 .env.example 复制 .env，请编辑填入 API_KEY:")
+        print(f"    {env_file}")
+        print()
 
     print()
     print("=" * 60)

@@ -4,16 +4,19 @@
 
 ## 功能
 
-- **图形界面** — 双击启动，粘贴链接即可，支持多任务队列、实时彩色日志、随时停止
+- **图形界面** — 双击启动，粘贴链接即可，支持实时彩色日志、随时停止
 - **视频下载** — 基于 yt-dlp，支持 B站、YouTube 等 1000+ 平台，可仅下载不做转写
 - **本地文件** — 支持本地视频/音频文件，也支持整个文件夹批量处理
 - **语音转文字** — 基于 faster-whisper，本地 GPU 加速，无需联网
 - **标点与分段** — LLM 自动为转写文本添加标点符号并按语义分段
+- **翻译** — 外文视频自动翻译为中文，生成汉化文档
+- **字幕** — 生成 SRT 字幕文件，可配合翻译生成中文字幕
 - **说话人分离** — 可选 pyannote.audio，区分多人对话并标记发言人
 - **AI 总结** — 兼容 OpenAI 接口（默认 DeepSeek），5 种总结风格，强调准确性，忠于原文不编造
 - **多格式输出** — 转写和总结可按需输出 `.md` `.txt` `.html`，HTML 支持暗色模式、TOC 导航、自适应全宽
 - **播放列表** — 支持 B站合集、YouTube 播放列表等批量处理
 - **断点续跑** — 中断后重新运行自动跳过已完成步骤
+- **环境诊断** — `python main.py --check` 一键检查 ffmpeg、模型、API、GPU
 - **跨平台** — Windows / Mac / Linux
 
 ## 系统要求
@@ -83,7 +86,7 @@ venv\Scripts\python gui.py  # Windows
 
 GUI 操作：
 - 输入框填写视频链接、本地文件路径或文件夹路径（每行一个）
-- 勾选模式：播放列表/合集、文件夹模式、仅下载、说话人分离
+- 勾选模式：播放列表/合集、文件夹模式、仅下载、说话人分离、翻译、字幕、跳过总结
 - 选择总结风格和输出格式
 - 点"开始处理"，日志区实时显示进度
 - 点"打开输出目录"查看结果
@@ -119,8 +122,20 @@ python main.py "https://example.com/video" --summary-style knowledge_points
 # 指定输出格式
 python main.py "https://example.com/video" --output-formats md,txt,html
 
+# 翻译 + 生成中文字幕
+python main.py "https://example.com/video" --translate --srt
+
+# 仅转写，跳过总结
+python main.py "https://example.com/video" --skip-summary
+
 # 启用说话人分离
 python main.py "https://example.com/video" --diarize
+
+# 跳过下载（已有视频文件，直接转写）
+python main.py "./output/视频标题/视频标题.mp4" --skip-download
+
+# 环境诊断
+python main.py --check
 ```
 
 ## 输出结构
@@ -131,13 +146,14 @@ python main.py "https://example.com/video" --diarize
 output/
 └── {标题}/
     ├── {标题}.mp4         # 原始视频（在线）或副本（本地）
-    ├── {标题}.txt         # 原始转写（Whisper 输出，中间文件）
     ├── {标题}.md          # 转写文档（已加标点分段，仅选中 md 时）
     ├── {标题}.html        # 转写文档（仅选中 html 时）
+    ├── {标题}.srt         # SRT 字幕（启用字幕时）
     ├── {标题}-总结.md      # AI 总结（仅选中 md 时）
-    ├── {标题}-总结.html    # AI 总结（仅选中 html 时）
-    └── .pipeline_state    # 进度状态（自动管理，断点续跑）
+    └── {标题}-总结.html    # AI 总结（仅选中 html 时）
 ```
+
+中间文件（`.txt`、`.pipeline_state`、`_zh.txt`、`_segments.json`）在任务完成后自动清理。
 
 **播放列表 / 文件夹批量处理：**
 
@@ -202,6 +218,7 @@ output/
 | `diarization.enabled` | 启用说话人分离 | `false` |
 | `diarization.min_speakers` | 最少说话人数 | `2` |
 | `diarization.max_speakers` | 最多说话人数 | `5` |
+| `translation.target_lang` | 翻译目标语言 | `zh`（中文） |
 | `downloader.format` | 视频质量 | `bestvideo[height<=1080]+bestaudio/best` |
 | `downloader.cookies_file` | Cookie 文件路径 | 空 |
 | `downloader.timeout` | 下载超时（秒） | `7200` |
@@ -292,7 +309,7 @@ A: 可尝试调整 `min_speakers` / `max_speakers` 参数。单人视频设 `max
 A: 确保已运行 `python setup.py` 完成初始化。用命令行 `venv\Scripts\python gui.py` 启动可看到错误信息。
 
 **Q: GPU 不可用？**
-A: 自动回退到 CPU。确保已安装 NVIDIA 驱动，且 `nvidia-cublas-cu12` 已安装。
+A: 自动回退到 CPU 并在日志中显示具体原因（如缺少 cuBLAS DLL、驱动版本不匹配等）。常见解决：确保 NVIDIA 驱动已安装，运行 `python main.py --check` 诊断。
 
 **Q: 下载失败？**
 A: 更新 yt-dlp：`venv/Scripts/pip install -U yt-dlp`

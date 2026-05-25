@@ -31,6 +31,36 @@ class Downloader:
     def _is_url(path: str) -> bool:
         return path.startswith(("http://", "https://"))
 
+    @staticmethod
+    def _progress_hook(d: Dict[str, Any]) -> None:
+        """yt-dlp 下载进度回调"""
+        status = d.get("status", "")
+        if status == "downloading":
+            pct = d.get("_percent_str", "?").strip()
+            speed = d.get("_speed_str", "?").strip()
+            eta = d.get("_eta_str", "?").strip()
+            logger.debug("下载: %s | %s | 剩余 %s", pct, speed, eta)
+        elif status == "finished":
+            logger.debug("下载完成，正在合并...")
+
+    def _ytdlp_opts(self, folder: Path, template: str, *,
+                     no_playlist: bool = True) -> Dict[str, Any]:
+        """构建 yt-dlp Python API 选项"""
+        opts: Dict[str, Any] = {
+            "outtmpl": str(folder / template),
+            "format": self.dl_config.get("format", "bestvideo[height<=1080]+bestaudio/best"),
+            "merge_output_format": "mp4",
+            "quiet": True,
+            "no_warnings": True,
+            "progress_hooks": [self._progress_hook],
+        }
+        if no_playlist:
+            opts["noplaylist"] = True
+        cookies: str = self.dl_config.get("cookies_file", "")
+        if cookies and os.path.exists(cookies):
+            opts["cookiefile"] = cookies
+        return opts
+
     def download(self, url: str, output_subdir: Optional[str] = None) -> Tuple[Path, Dict[str, Any]]:
         """下载视频或导入本地文件，返回 (video_path, meta)"""
         if not self._is_url(url):
@@ -48,25 +78,10 @@ class Downloader:
 
         logger.info("下载中: %s", title)
 
-        cmd: List[str] = [
-            self._get_ytdlp(),
-            url,
-            "-P", str(folder),
-            "-o", f"{title}.%(ext)s",
-            "--format", self.dl_config.get("format", "bestvideo[height<=1080]+bestaudio/best"),
-            "--merge-output-format", "mp4",
-            "--no-playlist",
-            "--print", "after_move:filepath",
-        ]
-
-        cookies: str = self.dl_config.get("cookies_file", "")
-        if cookies and os.path.exists(cookies):
-            cmd += ["--cookies", cookies]
-
-        timeout: int = int(self.dl_config.get("timeout", 7200))
-        result: subprocess.CompletedProcess = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if result.returncode != 0:
-            raise RuntimeError(f"下载失败: {result.stderr.strip() or result.stdout.strip()}")
+        import yt_dlp
+        opts = self._ytdlp_opts(folder, f"{title}.%(ext)s")
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
 
         video_path = self._find_video(folder)
         if not video_path:
@@ -107,7 +122,7 @@ class Downloader:
 
         result: subprocess.CompletedProcess = subprocess.run(
             [self._get_ytdlp(), "--flat-playlist", "--dump-json", url],
-            capture_output=True, text=True
+            capture_output=True, text=True, timeout=60
         )
 
         entries: List[Dict[str, Any]] = []
@@ -146,18 +161,11 @@ class Downloader:
         folder: Path = self.output_root / playlist_title
         folder.mkdir(parents=True, exist_ok=True)
 
-        cmd: List[str] = [
-            self._get_ytdlp(), url,
-            "-o", str(folder / "%(playlist_index)s-%(title)s.%(ext)s"),
-            "--format", self.dl_config.get("format", "bestvideo[height<=1080]+bestaudio/best"),
-            "--merge-output-format", "mp4",
-        ]
-
-        cookies: str = self.dl_config.get("cookies_file", "")
-        if cookies and os.path.exists(cookies):
-            cmd += ["--cookies", cookies]
-
-        subprocess.run(cmd, check=True, cwd=str(folder))
+        import yt_dlp
+        opts = self._ytdlp_opts(folder, "%(playlist_index)s-%(title)s.%(ext)s",
+                                no_playlist=False)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
 
         results: List[Tuple[Path, Dict[str, Any]]] = []
         for f in sorted(folder.glob("*.mp4")):

@@ -3,6 +3,7 @@
 从视频提取音频后转写为 Markdown 文档
 """
 import gc
+import json
 import logging
 import os
 import subprocess
@@ -10,61 +11,15 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-from utils import sanitize_filename, find_ffmpeg, set_state, PROJECT_ROOT, AUDIO_EXTS
+from utils import sanitize_filename, find_ffmpeg, set_state, PROJECT_ROOT, AUDIO_EXTS, init_cuda
 
 logger = logging.getLogger(__name__)
-
-_cuda_inited: bool = False
 
 _GPU_ERROR_KEYWORDS: List[str] = [
     "cublas", "cuda", "cudnn", "out of memory", "no kernel image",
     "invalid device", "device not found", "driver is too old",
     "cuda error", "gpu", "failed to load",
 ]
-
-
-def _init_cuda() -> None:
-    global _cuda_inited
-    if _cuda_inited:
-        return
-    _cuda_inited = True
-
-    import sys
-    import ctypes
-
-    for _d in sys.path:
-        _nvidia = os.path.join(_d, "nvidia")
-        if os.path.isdir(_nvidia):
-            for _sub in os.listdir(_nvidia):
-                _bin = os.path.join(_nvidia, _sub, "bin")
-                if os.path.isdir(_bin):
-                    try:
-                        os.add_dll_directory(_bin)
-                    except Exception:
-                        pass
-        _ctranslate = os.path.join(_d, "ctranslate2")
-        if os.path.isdir(_ctranslate):
-            try:
-                os.add_dll_directory(_ctranslate)
-            except Exception:
-                pass
-
-    for cuda_root in [r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA", os.environ.get("CUDA_PATH", "")]:
-        if cuda_root and os.path.isdir(cuda_root):
-            for ver_dir in sorted(os.listdir(cuda_root), reverse=True):
-                bin_dir = os.path.join(cuda_root, ver_dir, "bin")
-                if os.path.isdir(bin_dir):
-                    try:
-                        os.add_dll_directory(bin_dir)
-                    except Exception:
-                        pass
-                    break
-
-    for dll in ("cublas64_12.dll", "cublas64_11.dll", "cudart64_12.dll", "cudart64_11.dll"):
-        try:
-            ctypes.cdll.LoadLibrary(dll)
-        except OSError:
-            pass
 
 
 class Transcriber:
@@ -98,11 +53,19 @@ class Transcriber:
     # ---- 模型加载 ----
 
     def _resolve_model_path(self) -> str:
-        model_dirs = list(self._model_cache.glob("pengzhendong/faster-whisper-large-v3-turbo"))
-        if not model_dirs:
-            model_dirs = list(self._model_cache.glob("models--*"))
-        if model_dirs:
-            return str(model_dirs[0])
+        # 优先查找 ModelScope 目录结构
+        ms_dirs = list(self._model_cache.glob("pengzhendong/faster-whisper-large-v3-turbo"))
+        if ms_dirs:
+            return str(ms_dirs[0])
+
+        # 查找 HuggingFace 缓存结构: models--*/snapshots/*/
+        for hf_parent in self._model_cache.glob("models--*"):
+            snapshots = hf_parent / "snapshots"
+            if snapshots.is_dir():
+                for snap in sorted(snapshots.iterdir(), reverse=True):
+                    if snap.is_dir() and any(f.suffix == ".bin" for f in snap.iterdir()):
+                        return str(snap)
+
         return "large-v3-turbo"
 
     def _get_model(self, force_cpu: bool = False) -> Any:
@@ -110,7 +73,7 @@ class Transcriber:
         if self._model and not force_cpu:
             return self._model
 
-        _init_cuda()
+        init_cuda()
 
         from faster_whisper import WhisperModel
 
@@ -126,10 +89,13 @@ class Transcriber:
             self._model = WhisperModel(model_path, device=device, compute_type=compute,
                                        download_root=str(self._model_cache))
             logger.info("模型已加载 (device=%s, compute=%s)", device, compute)
-        except Exception:
+        except Exception as e:
             if force_cpu:
                 raise
-            logger.warning("GPU 不可用，回退到 CPU")
+            if self._is_gpu_error(e):
+                logger.warning("GPU 不可用，回退到 CPU: %s", e)
+            else:
+                logger.error("模型加载失败（非 GPU 错误），回退到 CPU: %s", e)
             device, compute = "cpu", "int8"
             self._model = WhisperModel(model_path, device="cpu", compute_type="int8",
                                        download_root=str(self._model_cache))
@@ -246,8 +212,21 @@ class Transcriber:
         def _do_transcribe(m):
             return m.transcribe(str(audio_path), language=language, word_timestamps=True)
 
+        def _collect_segments(segs) -> List[Dict[str, Any]]:
+            items: List[Dict[str, Any]] = []
+            for seg in segs:
+                text = seg.text.strip()
+                if text:
+                    items.append({
+                        "start": seg.start,
+                        "end": seg.end,
+                        "text": text,
+                    })
+            return items
+
         try:
             segs, info = _do_transcribe(model)
+            seg_items = _collect_segments(segs)
         except Exception as gpu_err:
             if self._is_gpu_error(gpu_err):
                 logger.warning("GPU 转写失败，回退到 CPU (%s)", gpu_err)
@@ -255,10 +234,12 @@ class Transcriber:
                 gc.collect()
                 model = self._get_model(force_cpu=True)
                 segs, info = _do_transcribe(model)
+                seg_items = _collect_segments(segs)
             else:
                 raise
 
-        transcript_text: str = self._format_transcript(segs)
+        self._save_segments_json(output_folder, safe_name, seg_items)
+        transcript_text: str = self._format_transcript(seg_items)
 
         with open(transcript_path, "w", encoding="utf-8") as f:
             f.write(f"# {safe_name}\n\n")
@@ -271,13 +252,23 @@ class Transcriber:
     # ---- 文本格式化 ----
 
     @staticmethod
+    @staticmethod
     def _format_transcript(segments) -> str:
         lines: List[str] = []
         for seg in segments:
-            text: str = seg.text.strip()
+            if isinstance(seg, dict):
+                text = seg.get("text", "").strip()
+            else:
+                text = seg.text.strip()
             if text:
                 lines.append(text)
         return "\n".join(lines)
+
+    @staticmethod
+    def _save_segments_json(folder: Path, safe_name: str, items: List[Dict[str, Any]]) -> None:
+        seg_path = folder / f"{safe_name}_segments.json"
+        with open(seg_path, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False)
 
     # ---- pyannote 说话人分离 ----
 
@@ -303,7 +294,7 @@ class Transcriber:
                 language = None
 
             segments, info = model.transcribe(
-                str(audio_path), language=language, word_timestamps=True
+                str(audio_path), language=language
             )
 
             # 2. pyannote 说话人分离
@@ -333,12 +324,19 @@ class Transcriber:
                 if torch.cuda.is_available():
                     pipeline = pipeline.to(torch.device("cuda"))
             except Exception:
-                pass
+                logger.warning("GPU 迁移失败，将使用 CPU 进行说话人分离（速度较慢）")
 
-            diarization = pipeline({"waveform": waveform, "sample_rate": sample_rate})
+            min_spk: int = self.diar_config.get("min_speakers", 2)
+            max_spk: int = self.diar_config.get("max_speakers", 5)
+            diarization = pipeline(
+                {"waveform": waveform, "sample_rate": sample_rate},
+                min_speakers=min_spk,
+                max_speakers=max_spk,
+            )
 
             # 3. 词 → 说话人匹配
             speaker_segments = self._assign_speakers(segments, diarization)
+            self._save_segments_json(output_folder, safe_name, speaker_segments)
 
             # 4. 格式化输出
             return self._format_diarized_output(
@@ -353,8 +351,8 @@ class Transcriber:
 
         results = []
         for seg in segments:
-            seg_text: str = seg.text.strip()
-            if not seg_text:
+            text = seg.text.strip()
+            if not text:
                 continue
 
             speaker_overlap: dict = {}
@@ -368,7 +366,7 @@ class Transcriber:
                 "speaker": dominant,
                 "start": seg.start,
                 "end": seg.end,
-                "text": seg_text,
+                "text": text,
             })
 
         return results
@@ -429,4 +427,4 @@ class Transcriber:
         else:
             cmd: List[str] = [ffmpeg, "-i", str(video_path), "-vn", "-acodec", "mp3",
                               "-q:a", "2", "-y", str(audio_path)]
-        subprocess.run(cmd, capture_output=True, check=True)
+        subprocess.run(cmd, capture_output=True, check=True, timeout=600)

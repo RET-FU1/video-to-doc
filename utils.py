@@ -75,6 +75,75 @@ def find_venv_executable(name: str) -> str:
     raise FileNotFoundError(f"未找到 {name}，请先运行 python setup.py")
 
 
+# ---- CUDA / GPU 检测 ----
+
+_cuda_inited: bool = False
+
+
+def init_cuda() -> None:
+    """初始化 CUDA DLL 搜索路径，Windows 下避免手动管理 PATH"""
+    global _cuda_inited
+    if _cuda_inited:
+        return
+    _cuda_inited = True
+
+    import ctypes
+
+    # 扫描 site-packages 中的 nvidia/ 和 ctranslate2/ DLL 目录
+    for _d in sys.path:
+        for _pkg in ("nvidia", "ctranslate2"):
+            _pkg_dir = os.path.join(_d, _pkg)
+            if os.path.isdir(_pkg_dir):
+                # 子目录的 bin/（nvidia/cublas/bin, nvidia/cuda_runtime/bin 等）
+                for _sub in os.listdir(_pkg_dir):
+                    _bin = os.path.join(_pkg_dir, _sub, "bin")
+                    if os.path.isdir(_bin):
+                        try:
+                            os.add_dll_directory(_bin)
+                        except Exception:
+                            pass
+                # 包目录本身可能直接包含 DLL（如 ctranslate2/cudnn64_9.dll）
+                if any(f.endswith(".dll") for f in os.listdir(_pkg_dir)):
+                    try:
+                        os.add_dll_directory(_pkg_dir)
+                    except Exception:
+                        pass
+
+    # 扫描 CUDA Toolkit 安装目录
+    for cuda_root in [r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA",
+                      os.environ.get("CUDA_PATH", "")]:
+        if cuda_root and os.path.isdir(cuda_root):
+            for ver_dir in sorted(os.listdir(cuda_root), reverse=True):
+                bin_dir = os.path.join(cuda_root, ver_dir, "bin")
+                if os.path.isdir(bin_dir):
+                    try:
+                        os.add_dll_directory(bin_dir)
+                    except Exception:
+                        pass
+                    break
+
+    # 预加载 cuBLAS / cuDART（版本号自适应）
+    for major in (13, 12, 11):
+        for dll in (f"cublas64_{major}.dll", f"cudart64_{major}.dll"):
+            try:
+                ctypes.cdll.LoadLibrary(dll)
+            except OSError:
+                pass
+
+
+def cublas_available() -> bool:
+    """检查 cuBLAS DLL 是否可加载"""
+    init_cuda()
+    import ctypes
+    for major in (13, 12, 11):
+        try:
+            ctypes.cdll.LoadLibrary(f"cublas64_{major}.dll")
+            return True
+        except OSError:
+            pass
+    return False
+
+
 # ---- 流水线状态管理 ----
 
 def get_state(folder: Path) -> str:
