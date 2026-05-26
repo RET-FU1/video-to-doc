@@ -79,9 +79,7 @@ class Pipeline:
             logger.info("已完成，跳过")
             return
 
-        logger.info("转写中...")
-        transcript_path = self.transcriber.transcribe(video_path, folder)
-        transcript_raw: str = transcript_path.read_text(encoding="utf-8")
+        transcript_raw: str = self._get_transcript(video_path, meta)
 
         # 翻译（可选，在抛光之前）
         translated_raw: Optional[str] = None
@@ -124,11 +122,15 @@ class Pipeline:
             self._generate_srt(folder, video_path.stem, translated_raw or transcript_raw)
 
         # 清理中间文件
-        transcript_path.unlink(missing_ok=True)
+        stem = video_path.stem
+        if "txt" not in formats:
+            (folder / f"{stem}.txt").unlink(missing_ok=True)
         (folder / ".pipeline_state").unlink(missing_ok=True)
-        (folder / f"{video_path.stem}_segments.json").unlink(missing_ok=True)
+        (folder / f"{stem}_segments.json").unlink(missing_ok=True)
+        (folder / f"{stem}_subtitle.srt").unlink(missing_ok=True)
+        (folder / f"{stem}_subtitle_info.json").unlink(missing_ok=True)
         if translated_raw:
-            zh_path = folder / f"{video_path.stem}_zh.txt"
+            zh_path = folder / f"{stem}_zh.txt"
             zh_path.unlink(missing_ok=True)
 
     def _polish_transcript(self, raw_text: str) -> str:
@@ -287,6 +289,58 @@ class Pipeline:
             ]
 
         generate_srt(segments_path, plain_lines, folder / f"{stem}.srt")
+
+    def _get_transcript(self, video_path: Path, meta: Dict[str, Any]) -> str:
+        """获取转写文本：优先使用视频平台字幕，不可用则回退 Whisper"""
+        folder = video_path.parent
+        stem = video_path.stem
+        sub_path = folder / f"{stem}_subtitle.srt"
+
+        if sub_path.exists():
+            result = self._try_use_subtitles(sub_path, folder, stem, meta)
+            if result is not None:
+                return result
+            # 字幕不达标，清理并回退
+            sub_path.unlink(missing_ok=True)
+            (folder / f"{stem}_subtitle_info.json").unlink(missing_ok=True)
+
+        # 回退 Whisper 转写
+        logger.info("转写中...")
+        transcript_path = self.transcriber.transcribe(video_path, folder)
+        return transcript_path.read_text(encoding="utf-8")
+
+    def _try_use_subtitles(self, sub_path: Path, folder: Path, stem: str,
+                            meta: Dict[str, Any]) -> Optional[str]:
+        """尝试使用下载的字幕。达标则写转写文件并返回文本，不达标返回 None。"""
+        import json as _json
+        from subtitle_extractor import parse_subtitle_file, assess_quality, write_transcript_output
+
+        info_path = folder / f"{stem}_subtitle_info.json"
+        if not info_path.exists():
+            return None
+
+        sub_info = _json.loads(info_path.read_text(encoding="utf-8"))
+
+        segments = parse_subtitle_file(sub_path)
+        if not segments:
+            logger.warning("字幕文件解析为空，回退 Whisper")
+            return None
+
+        sub_config = self.config.get("subtitles", {})
+        if not sub_config.get("enabled", False):
+            return None
+
+        duration = meta.get("duration", 0)
+        expected_lang = self.config.get("whisper", {}).get("language", "auto")
+        quality = assess_quality(segments, duration, sub_info["source"], expected_lang)
+
+        if not quality.is_acceptable:
+            logger.info("字幕质量不达标（%s），回退 Whisper", ", ".join(quality.details[1:]))
+            return None
+
+        logger.info("使用视频自带字幕（%s/%s），%s，跳过 Whisper 转写",
+                   sub_info["source"], sub_info["language"], quality.details[0])
+        return write_transcript_output(segments, stem, folder)
 
     def _process_playlist(self, url: str) -> Path:
         logger.info("[播放列表模式]")

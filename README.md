@@ -5,13 +5,13 @@
 ## 功能
 
 - **图形界面** — 双击启动，粘贴链接即可，支持实时彩色日志、随时停止
-- **视频下载** — 基于 yt-dlp，支持 B站、YouTube 等 1000+ 平台，可仅下载不做转写
-- **本地文件** — 支持本地视频/音频文件，也支持整个文件夹批量处理
-- **语音转文字** — 基于 faster-whisper，本地 GPU 加速，无需联网
+- **自动环境** — 自动使用项目虚拟环境，无需手动激活
+- **字幕优先** — 优先提取视频平台字幕（YouTube/B站），质量达标则跳过 Whisper 转写，大幅节省时间
+- **语音转文字** — 基于 faster-whisper，本地 GPU 加速，无需联网；字幕不可用时自动回退
 - **标点与分段** — LLM 自动为转写文本添加标点符号并按语义分段
 - **翻译** — 外文视频自动翻译为中文，生成汉化文档
-- **字幕** — 生成 SRT 字幕文件，可配合翻译生成中文字幕
-- **说话人分离** — 可选 pyannote.audio，区分多人对话并标记发言人
+- **字幕生成** — 生成 SRT 字幕文件，可配合翻译生成中文字幕
+- **说话人分离** — 可选 pyannote.audio，区分多人对话并标记发言人，内置交替噪声平滑
 - **AI 总结** — 兼容 OpenAI 接口（默认 DeepSeek），5 种总结风格，强调准确性，忠于原文不编造
 - **多格式输出** — 转写和总结可按需输出 `.md` `.txt` `.html`，HTML 支持暗色模式、TOC 导航、自适应全宽
 - **播放列表** — 支持 B站合集、YouTube 播放列表等批量处理
@@ -47,7 +47,7 @@ cd video-to-doc
 python setup.py
 ```
 
-首次运行会下载 Whisper 模型（约 1.6GB），仅此一次。
+首次运行会下载 Whisper 模型（约 1.6GB），仅此一次。之后 `python main.py` 和 `python gui.py` 会自动使用项目虚拟环境，无需手动激活。
 
 ### 3. 配置 API Key
 
@@ -77,34 +77,30 @@ AI 总结和标点分段功能依赖 API。转写功能不依赖 API（仅 faste
 
 **图形界面（推荐）：**
 
-Windows 双击 `启动.vbs`（无窗口）或 `启动.bat`（有终端）。其他系统：
+Windows 双击 `启动.vbs`（无窗口）或 `启动.bat`（有终端），或直接：
 
 ```bash
-venv/bin/python gui.py      # Mac / Linux
-venv\Scripts\python gui.py  # Windows
+python gui.py
 ```
+
+程序自动检测并使用项目虚拟环境，无需手动激活。
 
 GUI 操作：
 - 输入框填写视频链接、本地文件路径或文件夹路径（每行一个）
 - 勾选模式：播放列表/合集、文件夹模式、仅下载、说话人分离、翻译、字幕、跳过总结
 - 选择总结风格和输出格式
+- 设置输出目录（或点击"浏览..."选择）
 - 点"开始处理"，日志区实时显示进度
 - 点"打开输出目录"查看结果
 
 **命令行：**
 
 ```bash
-# 激活虚拟环境
-venv\Scripts\activate      # Windows
-source venv/bin/activate   # Mac/Linux
-
 # 在线视频
 python main.py "https://www.bilibili.com/video/BV1xx411x7xx"
 
-# 本地视频文件
+# 本地视频/音频文件
 python main.py "C:/videos/myvideo.mp4"
-
-# 本地音频文件
 python main.py "C:/audio/podcast.mp3"
 
 # 文件夹批量处理
@@ -122,6 +118,9 @@ python main.py "https://example.com/video" --summary-style knowledge_points
 # 指定输出格式
 python main.py "https://example.com/video" --output-formats md,txt,html
 
+# 自定义输出目录
+python main.py "https://example.com/video" -o ./my-output
+
 # 翻译 + 生成中文字幕
 python main.py "https://example.com/video" --translate --srt
 
@@ -131,8 +130,8 @@ python main.py "https://example.com/video" --skip-summary
 # 启用说话人分离
 python main.py "https://example.com/video" --diarize
 
-# 跳过下载（已有视频文件，直接转写）
-python main.py "./output/视频标题/视频标题.mp4" --skip-download
+# 指定视频文件路径（下载器自动检测已下载状态并跳过）
+python main.py "./output/视频标题/视频标题.mp4"
 
 # 环境诊断
 python main.py --check
@@ -153,7 +152,7 @@ output/
     └── {标题}-总结.html    # AI 总结（仅选中 html 时）
 ```
 
-中间文件（`.txt`、`.pipeline_state`、`_zh.txt`、`_segments.json`）在任务完成后自动清理。
+中间文件（`.txt`、`.pipeline_state`、`_segments.json`、`_subtitle.srt`、`_subtitle_info.json`、`_zh.txt`）在任务完成后自动清理。
 
 **播放列表 / 文件夹批量处理：**
 
@@ -201,7 +200,7 @@ output/
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `output_dir` | 输出目录 | `./output` |
+| `output_dir` | 输出目录（CLI 可用 `-o` 覆盖） | `./output` |
 | `whisper.language` | 转写语言 | `auto`（自动检测） |
 | `whisper.device` | 推理设备 | `cuda` |
 | `whisper.compute_type` | 精度 | `float16`（GPU）/ `int8`（CPU） |
@@ -215,10 +214,17 @@ output/
 | `summarizer.max_retries` | API 失败重试次数 | `3` |
 | `summarizer.summary_style` | 默认总结风格 | `auto` |
 | `summarizer.output_formats` | 输出格式 | `[md]` |
+| `subtitles.enabled` | 优先提取视频平台字幕 | `true` |
+| `subtitles.languages` | 字幕语言优先级 | `[zh, zh-Hans, zh-Hant, en]` |
+| `subtitles.fallback_to_whisper` | 字幕不可用时回退 Whisper | `true` |
+| `subtitles.auto_subtitle.min_coverage` | 自动字幕最低覆盖率 | `0.50` |
+| `subtitles.auto_subtitle.max_noise_ratio` | 自动字幕最大噪音占比 | `0.10` |
 | `diarization.enabled` | 启用说话人分离 | `false` |
 | `diarization.min_speakers` | 最少说话人数 | `2` |
 | `diarization.max_speakers` | 最多说话人数 | `5` |
+| `diarization.min_turn_duration` | 最短说话轮次（秒），短于此值平滑合并 | `1.5` |
 | `translation.target_lang` | 翻译目标语言 | `zh`（中文） |
+| `translation.model` | 翻译专用模型，留空复用 `summarizer.model` | 空 |
 | `downloader.format` | 视频质量 | `bestvideo[height<=1080]+bestaudio/best` |
 | `downloader.cookies_file` | Cookie 文件路径 | 空 |
 | `downloader.timeout` | 下载超时（秒） | `7200` |
@@ -306,7 +312,7 @@ A: 可尝试调整 `min_speakers` / `max_speakers` 参数。单人视频设 `max
 ## 常见问题
 
 **Q: 启动 GUI 无反应？**
-A: 确保已运行 `python setup.py` 完成初始化。用命令行 `venv\Scripts\python gui.py` 启动可看到错误信息。
+A: 确保已运行 `python setup.py` 完成初始化（创建 venv + 安装依赖）。用命令行 `python gui.py` 启动可看到错误信息。程序会自动在项目 venv 中运行。
 
 **Q: GPU 不可用？**
 A: 自动回退到 CPU 并在日志中显示具体原因（如缺少 cuBLAS DLL、驱动版本不匹配等）。常见解决：确保 NVIDIA 驱动已安装，运行 `python main.py --check` 诊断。

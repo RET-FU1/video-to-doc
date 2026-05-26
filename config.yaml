@@ -35,10 +35,25 @@ diarization:
   hf_token: ""                   # HuggingFace Token，也支持 .env 中 HF_TOKEN
   min_speakers: 2                # 预估最少说话人数
   max_speakers: 5                # 预估最多说话人数
+  min_turn_duration: 1.5         # 最短说话轮次（秒），短于此值的 pyannote turn 会平滑合并
 
 # 翻译（可选，用于外文视频输出汉化文档和字幕）
 translation:
   target_lang: zh               # 目标语言，zh=中文，en=英文，ja=日文等
+
+# 字幕优先提取（可选，优先使用视频平台字幕代替 Whisper 转写）
+subtitles:
+  enabled: true                  # true 启用字幕优先提取
+  languages:                     # 首选语言，按优先级排列
+    - zh
+    - zh-Hans
+    - zh-Hant
+    - en
+  prefer_manual: true            # true=优先人工字幕，质量更高
+  fallback_to_whisper: true      # true=字幕不可用或质量不达标时回退 Whisper
+  auto_subtitle:                 # 自动字幕质量阈值
+    min_coverage: 0.50           # 最低覆盖率（0-1），低于此值回退 Whisper
+    max_noise_ratio: 0.10        # 最大噪音占比（0-1），[Music] 等非语音标签比例
 
 # 下载设置
 downloader:

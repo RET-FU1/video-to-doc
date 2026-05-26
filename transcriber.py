@@ -335,7 +335,8 @@ class Transcriber:
             )
 
             # 3. 词 → 说话人匹配
-            speaker_segments = self._assign_speakers(segments, diarization)
+            min_turn = self.diar_config.get("min_turn_duration", 0)
+            speaker_segments = self._assign_speakers(segments, diarization, min_turn=min_turn)
             self._save_segments_json(output_folder, safe_name, speaker_segments)
 
             # 4. 格式化输出
@@ -344,10 +345,25 @@ class Transcriber:
             )
 
     @staticmethod
-    def _assign_speakers(segments, diarization) -> list:
+    def _assign_speakers(segments, diarization, min_turn: float = 0.0) -> list:
         speaker_turns = []
         for turn, _, speaker in diarization.speaker_diarization.itertracks(yield_label=True):
             speaker_turns.append((turn.start, turn.end, speaker))
+
+        raw_count = len(speaker_turns)
+        raw_switches = sum(1 for i in range(1, raw_count)
+                          if speaker_turns[i][2] != speaker_turns[i-1][2])
+        logger.debug("pyannote: %d raw turns, %d switches (%.0f%%)",
+                    raw_count, raw_switches,
+                    raw_switches / (raw_count - 1) * 100 if raw_count > 1 else 0)
+
+        if min_turn > 0:
+            speaker_turns = Transcriber._smooth_turns(speaker_turns, min_turn)
+            smooth_count = len(speaker_turns)
+            smooth_switches = sum(1 for i in range(1, smooth_count)
+                                 if speaker_turns[i][2] != speaker_turns[i-1][2])
+            logger.info("平滑后: %d turns → %d turns, 切换 %d → %d",
+                       raw_count, smooth_count, raw_switches, smooth_switches)
 
         results = []
         for seg in segments:
@@ -370,6 +386,33 @@ class Transcriber:
             })
 
         return results
+
+    @staticmethod
+    def _smooth_turns(turns: list, min_dur: float) -> list:
+        """合并过短且被同一说话人包围的 turn，消除模型交替噪声"""
+        if len(turns) < 3:
+            return turns
+        smoothed = [turns[0]]
+        for i in range(1, len(turns) - 1):
+            prev = smoothed[-1]
+            curr = turns[i]
+            nxt = turns[i + 1]
+            dur = curr[1] - curr[0]
+            if dur < min_dur and prev[2] == nxt[2] and prev[2] != curr[2]:
+                # 短 turn 且邻居相同 → 合并到前一个
+                smoothed[-1] = (prev[0], curr[1], prev[2])
+            else:
+                smoothed.append(curr)
+        smoothed.append(turns[-1])
+
+        # 平滑可能产生相邻同说话人 turn，需二次合并
+        merged = [smoothed[0]]
+        for turn in smoothed[1:]:
+            if turn[2] == merged[-1][2]:
+                merged[-1] = (merged[-1][0], turn[1], merged[-1][2])
+            else:
+                merged.append(turn)
+        return merged
 
     def _format_diarized_output(self, result: Dict[str, Any], output_folder: Path,
                                 safe_name: str) -> Path:

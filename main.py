@@ -5,7 +5,6 @@ Video-to-Doc — 视频下载、转写、总结一体化工具
   python main.py <视频URL>                        单视频/音频
   python main.py <本地文件路径>                    本地视频/音频文件
   python main.py <视频URL> --playlist              播放列表/合集
-  python main.py <视频URL> --skip-download         跳过下载，直接转写+总结
   python main.py <视频URL> --summary-style steps   指定总结风格
   python main.py <视频URL> --translate             翻译转写为中文
   python main.py <视频URL> --srt                   生成 SRT 字幕文件
@@ -19,10 +18,20 @@ Video-to-Doc — 视频下载、转写、总结一体化工具
   core_ideas       提炼核心观点
   expert           专家深度分析
 """
-import argparse
-import logging
 import sys
 from pathlib import Path
+
+# 自动重定向到项目虚拟环境
+_PROJECT_ROOT = Path(__file__).parent
+_VENV_PYTHON = (_PROJECT_ROOT / "venv" / "Scripts" / "python.exe"
+                if sys.platform == "win32"
+                else _PROJECT_ROOT / "venv" / "bin" / "python")
+if _VENV_PYTHON.exists() and _VENV_PYTHON.resolve() != Path(sys.executable).resolve():
+    import subprocess
+    sys.exit(subprocess.run([str(_VENV_PYTHON), __file__] + sys.argv[1:]).returncode)
+
+import argparse
+import logging
 from typing import Dict, Any
 
 import yaml
@@ -217,6 +226,8 @@ def main() -> None:
                         help="生成 SRT 字幕文件（可配合 --translate 生成中文字幕）")
     parser.add_argument("--skip-summary", action="store_true",
                         help="跳过 AI 总结步骤")
+    parser.add_argument("-o", "--output-dir", default=None,
+                        help="输出目录（覆盖 config.yaml 中的 output_dir）")
     parser.add_argument("--check", action="store_true",
                         help="诊断环境：检查 ffmpeg、模型、API Key、GPU 等是否就绪")
 
@@ -239,6 +250,8 @@ def main() -> None:
     ]
     if args.diarize:
         config.setdefault("diarization", {})["enabled"] = True
+    if args.output_dir and args.output_dir.strip():
+        config["output_dir"] = args.output_dir.strip()
 
     if args.check:
         run_check(config)

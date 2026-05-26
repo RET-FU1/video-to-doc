@@ -1,13 +1,23 @@
 """
 Video-to-Doc 图形界面
 """
+import sys
+from pathlib import Path
+
+# 自动重定向到项目虚拟环境
+_PROJECT_ROOT = Path(__file__).parent
+_VENV_PYTHON = (_PROJECT_ROOT / "venv" / "Scripts" / "python.exe"
+                if sys.platform == "win32"
+                else _PROJECT_ROOT / "venv" / "bin" / "python")
+if _VENV_PYTHON.exists() and _VENV_PYTHON.resolve() != Path(sys.executable).resolve():
+    import subprocess
+    sys.exit(subprocess.run([str(_VENV_PYTHON), __file__] + sys.argv[1:]).returncode)
+
 import logging
 import os
 import subprocess
-import sys
 import threading
 from contextlib import contextmanager
-from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -196,6 +206,22 @@ class App:
                 cb.pack(side="left", padx=(12, 0))
                 self.fmt_cbs.append(cb)
 
+            row4 = tk.Frame(card, bg=C["card"])
+            row4.pack(fill="x", pady=(8, 0))
+            tk.Label(row4, text="输出目录：", font=F["body"],
+                     fg=C["text"], bg=C["card"]).pack(side="left")
+
+            self.output_dir_var = tk.StringVar(value=str(PROJECT_ROOT / "output"))
+            self.output_entry = tk.Entry(row4, textvariable=self.output_dir_var,
+                                         font=F["body"], bg="#f9fafb", fg=C["text"],
+                                         relief="solid", borderwidth=1, width=50)
+            self.output_entry.pack(side="left", padx=(6, 4), fill="x", expand=True)
+
+            tk.Button(row4, text="浏览...", command=self._browse_output_dir,
+                      font=F["small"], fg=C["text"], bg="#e5e7eb",
+                      activebackground="#d1d5db", relief="flat",
+                      padx=8, pady=2).pack(side="left")
+
         # 按钮行
         btn_row = tk.Frame(main, bg=C["bg"])
         btn_row.pack(fill="x", pady=(0, 10))
@@ -278,6 +304,12 @@ class App:
         self.style_combo.configure(state=readonly)
         for cb in self.fmt_cbs:
             cb.configure(state=state)
+
+    def _browse_output_dir(self):
+        from tkinter import filedialog
+        path = filedialog.askdirectory(title="选择输出目录")
+        if path:
+            self.output_dir_var.set(path)
 
     def _on_style_change(self, event=None):
         descs = {
@@ -371,6 +403,9 @@ class App:
         summarizer_cfg["output_formats"] = formats
         if self.diarize_var.get():
             config.setdefault("diarization", {})["enabled"] = True
+        output_dir = self.output_dir_var.get().strip()
+        if output_dir:
+            config["output_dir"] = output_dir
 
         # 注入 GUI 日志 handler
         handler = _GuiLogHandler(self)
@@ -420,7 +455,8 @@ class App:
         self.start_btn.configure(state="normal")
 
     def open_output(self):
-        output_dir = PROJECT_ROOT / "output"
+        path_str = self.output_dir_var.get().strip()
+        output_dir = Path(path_str) if path_str else (PROJECT_ROOT / "output")
         output_dir.mkdir(parents=True, exist_ok=True)
         if sys.platform == "win32":
             os.startfile(str(output_dir))

@@ -74,6 +74,7 @@ class Downloader:
         video_path: Optional[Path] = self._find_video(folder)
         if video_path and is_done(folder):
             logger.info("已下载: %s", title)
+            self._try_download_subtitles(url, folder, title)
             return video_path, meta
 
         logger.info("下载中: %s", title)
@@ -88,6 +89,7 @@ class Downloader:
             raise FileNotFoundError(f"下载后未找到视频文件于 {folder}")
 
         set_state(folder, "downloaded")
+        self._try_download_subtitles(url, folder, title)
         return video_path, meta
 
     def _import_local(self, path: str, output_subdir: Optional[str] = None) -> Tuple[Path, Dict[str, Any]]:
@@ -194,3 +196,104 @@ class Downloader:
             if videos:
                 return videos[0]
         return None
+
+    def _try_download_subtitles(self, url: str, folder: Path, stem: str) -> Optional[Path]:
+        """尝试下载最佳匹配的字幕，保存为 {stem}_subtitle.srt。
+        返回字幕文件路径，无可用于幕则返回 None。
+        """
+        sub_config = self.config.get("subtitles", {})
+        if not sub_config.get("enabled", False):
+            return None
+
+        target = folder / f"{stem}_subtitle.srt"
+        if target.exists():
+            return target
+
+        preferred_langs = sub_config.get("languages", ["zh", "en"])
+        prefer_manual = sub_config.get("prefer_manual", True)
+
+        import yt_dlp
+
+        # 查询可用字幕
+        try:
+            opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception:
+            logger.debug("无法查询字幕信息")
+            return None
+
+        manual_subs = info.get("subtitles", {}) or {}
+        auto_subs = info.get("automatic_captions", {}) or {}
+
+        # 按优先级尝试：人工 → 自动
+        sources: List[tuple] = []
+        if prefer_manual:
+            sources.append(("manual", manual_subs))
+        sources.append(("auto_generated", auto_subs))
+
+        for source, subs in sources:
+            if not subs:
+                continue
+            for lang in preferred_langs:
+                if lang in subs:
+                    result = self._download_single_subtitle(
+                        url, lang, folder, stem, source, target
+                    )
+                    if result:
+                        return result
+
+        return None
+
+    @staticmethod
+    def _download_single_subtitle(url: str, lang: str, folder: Path,
+                                   stem: str, source: str,
+                                   target: Path) -> Optional[Path]:
+        """下载单个语言的字幕轨道，保存为标准文件名"""
+        import json as _json
+        import yt_dlp
+
+        is_manual = (source == "manual")
+
+        dl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "subtitleslangs": [lang],
+            "subtitlesformat": "srt",
+            "outtmpl": str(folder / f"{stem}.%(ext)s"),
+        }
+        if is_manual:
+            dl_opts["writesubtitles"] = True
+        else:
+            dl_opts["writeautomaticsub"] = True
+
+        try:
+            before = set(folder.glob("*"))
+            with yt_dlp.YoutubeDL(dl_opts) as ydl:
+                ydl.download([url])
+            after = set(folder.glob("*"))
+
+            new_files = [f for f in (after - before) if f.suffix in (".srt", ".vtt")]
+            if not new_files:
+                return None
+
+            sub_path = new_files[0]
+            if sub_path != target:
+                # 避免 Windows 下跨磁盘 rename 报错
+                if sub_path.suffix != target.suffix:
+                    target = target.with_suffix(sub_path.suffix)
+                sub_path.rename(target)
+
+            # 保存字幕元信息
+            info_path = folder / f"{stem}_subtitle_info.json"
+            info_path.write_text(_json.dumps({
+                "source": source,
+                "language": lang,
+            }, ensure_ascii=False), encoding="utf-8")
+
+            logger.info("已下载字幕 (%s/%s)", source, lang)
+            return target
+        except Exception as e:
+            logger.debug("字幕下载失败 (%s/%s): %s", source, lang, e)
+            return None
