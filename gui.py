@@ -103,6 +103,7 @@ class App:
                                     relief="solid", borderwidth=1,
                                     padx=10, pady=8)
             self.url_text.pack(fill="x", pady=(8, 4))
+            self._add_context_menu(self.url_text, is_text=True)
 
             tk.Label(card, text="支持 URL / 本地视频 / 本地音频 (mp3/wav/m4a等) / 文件夹路径。文件夹模式只需填写一行",
                      font=F["small"], fg=C["muted"], bg=C["card"]).pack(anchor="w")
@@ -216,6 +217,7 @@ class App:
                                          font=F["body"], bg="#f9fafb", fg=C["text"],
                                          relief="solid", borderwidth=1, width=50)
             self.output_entry.pack(side="left", padx=(6, 4), fill="x", expand=True)
+            self._add_context_menu(self.output_entry)
 
             tk.Button(row4, text="浏览...", command=self._browse_output_dir,
                       font=F["small"], fg=C["text"], bg="#e5e7eb",
@@ -286,6 +288,25 @@ class App:
                      highlightthickness=1, padx=16, pady=12)
         f.pack(fill="x", **pack_kw)
         yield f
+
+    def _add_context_menu(self, widget, *, is_text=False):
+        """为输入框绑定右键粘贴菜单"""
+        menu = tk.Menu(widget, tearoff=0)
+        if is_text:
+            # tk.Text: 同时提供复制、剪切、粘贴
+            menu.add_command(label="剪切", command=lambda: widget.event_generate("<<Cut>>"))
+            menu.add_command(label="复制", command=lambda: widget.event_generate("<<Copy>>"))
+            menu.add_command(label="粘贴", command=lambda: widget.event_generate("<<Paste>>"))
+        else:
+            menu.add_command(label="粘贴", command=lambda: widget.event_generate("<<Paste>>"))
+
+        def _show_menu(event):
+            menu.tk_popup(event.x_root, event.y_root)
+            menu.grab_release()
+
+        widget.bind("<Button-3>", _show_menu)
+        # 也支持 Mac 的 Ctrl+Click
+        widget.bind("<Control-Button-1>", _show_menu)
 
     def _on_folder_toggle(self):
         if self.folder_var.get():
