@@ -69,7 +69,7 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("Video-to-Doc")
-        self.root.geometry("900x780")
+        self.root.geometry("800x960")
         self.root.minsize(600, 450)
         self.root.configure(bg=C["bg"])
         self._stopped = False
@@ -98,7 +98,7 @@ class App:
             tk.Label(card, text="视频/音频", font=F["section"],
                      fg=C["text"], bg=C["card"]).pack(anchor="w")
 
-            self.url_text = tk.Text(card, height=3, wrap="word",
+            self.url_text = tk.Text(card, height=8, wrap="word",
                                     font=F["body"], bg="#f9fafb", fg=C["text"],
                                     relief="solid", borderwidth=1,
                                     padx=10, pady=8)
