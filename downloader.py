@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -32,6 +33,20 @@ class Downloader:
         return path.startswith(("http://", "https://"))
 
     @staticmethod
+    def _quality_to_format(quality: str) -> str:
+        """将清晰度预设映射为 yt-dlp format 字符串"""
+        mapping = {
+            "best":   "bestvideo+bestaudio/best",
+            "2160p":  "bestvideo[height<=2160]+bestaudio/best",
+            "1080p":  "bestvideo[height<=1080]+bestaudio/best",
+            "720p":   "bestvideo[height<=720]+bestaudio/best",
+            "480p":   "bestvideo[height<=480]+bestaudio/best",
+            "360p":   "bestvideo[height<=360]+bestaudio/best",
+            "audio":  "bestaudio/best",
+        }
+        return mapping.get(quality, mapping["1080p"])
+
+    @staticmethod
     def _progress_hook(d: Dict[str, Any]) -> None:
         """yt-dlp 下载进度回调"""
         status = d.get("status", "")
@@ -46,19 +61,38 @@ class Downloader:
     def _ytdlp_opts(self, folder: Path, template: str, *,
                      no_playlist: bool = True) -> Dict[str, Any]:
         """构建 yt-dlp Python API 选项"""
+        retries: int = int(self.dl_config.get("retries", 10))
+        fragment_retries: int = int(self.dl_config.get("fragment_retries", 30))
+        socket_timeout: int = int(self.dl_config.get("socket_timeout", 30))
+        # 清晰度：优先使用自定义 format，否则从 quality 预设映射
+        fmt = self.dl_config.get("format", "")
+        if not fmt:
+            fmt = self._quality_to_format(self.dl_config.get("quality", "1080p"))
         opts: Dict[str, Any] = {
             "outtmpl": str(folder / template),
-            "format": self.dl_config.get("format", "bestvideo[height<=1080]+bestaudio/best"),
+            "format": fmt,
             "merge_output_format": "mp4",
             "quiet": True,
             "no_warnings": True,
             "progress_hooks": [self._progress_hook],
+            "retries": retries,
+            "fragment_retries": fragment_retries,
+            "concurrent_fragment_downloads": 8,  # 并行下载分片，加速
+            "socket_timeout": socket_timeout,
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5",
+            },
         }
         if no_playlist:
             opts["noplaylist"] = True
         cookies: str = self.dl_config.get("cookies_file", "")
         if cookies and os.path.exists(cookies):
             opts["cookiefile"] = cookies
+        proxy: str = self.dl_config.get("proxy", "")
+        if proxy:
+            opts["proxy"] = proxy
         return opts
 
     def download(self, url: str, output_subdir: Optional[str] = None) -> Tuple[Path, Dict[str, Any]]:
@@ -79,10 +113,26 @@ class Downloader:
 
         logger.info("下载中: %s", title)
 
+        max_attempts: int = int(self.dl_config.get("max_download_attempts", 3))
+        last_error = None
         import yt_dlp
-        opts = self._ytdlp_opts(folder, f"{title}.%(ext)s")
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
+        for attempt in range(1, max_attempts + 1):
+            try:
+                opts = self._ytdlp_opts(folder, f"{title}.%(ext)s")
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([url])
+                break
+            except Exception as e:
+                # 不吞掉用户中断
+                if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                    raise
+                last_error = e
+                if attempt < max_attempts:
+                    wait = attempt * 5
+                    logger.warning("下载失败 (%d/%d): %s，%d 秒后重试...", attempt, max_attempts, e, wait)
+                    time.sleep(wait)
+                else:
+                    raise
 
         video_path = self._find_video(folder)
         if not video_path:
@@ -153,6 +203,8 @@ class Downloader:
                 video_path, video_meta = self.download(video_url, output_subdir=playlist_title)
                 results.append((video_path, video_meta))
             except Exception as e:
+                if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                    raise
                 logger.warning("[SKIP] 下载失败: %s", e)
                 continue
 
@@ -176,18 +228,50 @@ class Downloader:
 
     def _fetch_meta(self, url: str) -> Dict[str, Any]:
         """获取视频元信息"""
-        try:
-            result: subprocess.CompletedProcess = subprocess.run(
-                [self._get_ytdlp(), "--dump-json", "--no-playlist", url],
-                capture_output=True, text=True, timeout=30
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return json.loads(result.stdout.strip())
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
-            logger.warning("获取元信息失败: %s", e)
-        except Exception as e:
-            logger.warning("获取元信息失败 (%s): %s", type(e).__name__, e)
-        return {"title": url.split("/")[-1]}
+        ytdlp = self._get_ytdlp()
+        base_args = [
+            ytdlp, "--dump-json", "--no-playlist",
+            "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "--add-header", "Accept-Language:zh-CN,zh;q=0.9,en;q=0.5",
+        ]
+        cookies: str = self.dl_config.get("cookies_file", "")
+        if cookies and os.path.exists(cookies):
+            base_args.extend(["--cookies", cookies])
+        for attempt in range(1, 4):
+            try:
+                result: subprocess.CompletedProcess = subprocess.run(
+                    base_args + [url],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    info = json.loads(result.stdout.strip())
+                    # 提取章节信息（YouTube/B站等平台的视频章节标记）
+                    chapters = info.get("chapters") or []
+                    if chapters:
+                        info["_chapters"] = [
+                            {"start": c["start_time"], "end": c["end_time"], "title": c.get("title", "")}
+                            for c in chapters
+                        ]
+                    return info
+                # 输出 stderr 便于排查
+                stderr_tail = result.stderr.strip().split("\n")[-1] if result.stderr.strip() else ""
+                if stderr_tail:
+                    logger.warning("获取元信息失败 (尝试 %d/3): %s", attempt, stderr_tail[:200])
+            except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
+                logger.warning("获取元信息失败 (尝试 %d/3): %s", attempt, e)
+            except Exception as e:
+                if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                    raise
+                logger.warning("获取元信息失败 (%s, 尝试 %d/3): %s", type(e).__name__, attempt, e)
+            if attempt < 3:
+                time.sleep(3)
+        # Fallback: extract video ID from URL, stripping query params
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        path_parts = [p for p in parsed.path.split("/") if p]
+        fallback_id = path_parts[-1] if path_parts else url
+        return {"title": fallback_id}
 
     def _find_video(self, folder: Path) -> Optional[Path]:
         """在目录中递归寻找视频文件"""
@@ -216,15 +300,29 @@ class Downloader:
 
         # 查询可用字幕
         try:
-            opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+            opts = {
+                "quiet": True, "no_warnings": False, "skip_download": True,
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5",
+                },
+            }
+            cookies: str = self.dl_config.get("cookies_file", "")
+            if cookies and os.path.exists(cookies):
+                opts["cookiefile"] = cookies
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-        except Exception:
-            logger.debug("无法查询字幕信息")
+        except Exception as e:
+            logger.info("无法查询字幕信息: %s", e)
             return None
 
         manual_subs = info.get("subtitles", {}) or {}
         auto_subs = info.get("automatic_captions", {}) or {}
+
+        # 过滤弹幕（B站 danmaku 不是真正的字幕）
+        manual_subs = {k: v for k, v in manual_subs.items() if k != "danmaku"}
+        auto_subs = {k: v for k, v in auto_subs.items() if k != "danmaku"}
 
         # 按优先级尝试：人工 → 自动
         sources: List[tuple] = []
@@ -238,17 +336,24 @@ class Downloader:
             for lang in preferred_langs:
                 if lang in subs:
                     result = self._download_single_subtitle(
-                        url, lang, folder, stem, source, target
+                        url, lang, folder, stem, source, target, cookies
                     )
                     if result:
                         return result
 
+        # 汇总可用语言用于日志提示
+        all_langs = set(manual_subs.keys()) | set(auto_subs.keys())
+        if all_langs:
+            logger.info("未找到匹配的字幕语言（可用: %s，期望: %s）",
+                       ", ".join(sorted(all_langs)), ", ".join(preferred_langs))
+        else:
+            logger.info("该视频无可用于幕（可能需要登录平台或视频本身无字幕）")
         return None
 
     @staticmethod
     def _download_single_subtitle(url: str, lang: str, folder: Path,
                                    stem: str, source: str,
-                                   target: Path) -> Optional[Path]:
+                                   target: Path, cookies: str = "") -> Optional[Path]:
         """下载单个语言的字幕轨道，保存为标准文件名"""
         import json as _json
         import yt_dlp
@@ -257,12 +362,19 @@ class Downloader:
 
         dl_opts = {
             "quiet": True,
-            "no_warnings": True,
+            "no_warnings": False,
             "skip_download": True,
             "subtitleslangs": [lang],
             "subtitlesformat": "srt",
             "outtmpl": str(folder / f"{stem}.%(ext)s"),
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5",
+            },
         }
+        if cookies and os.path.exists(cookies):
+            dl_opts["cookiefile"] = cookies
         if is_manual:
             dl_opts["writesubtitles"] = True
         else:
@@ -295,5 +407,5 @@ class Downloader:
             logger.info("已下载字幕 (%s/%s)", source, lang)
             return target
         except Exception as e:
-            logger.debug("字幕下载失败 (%s/%s): %s", source, lang, e)
+            logger.info("字幕下载失败 (%s/%s): %s", source, lang, e)
             return None

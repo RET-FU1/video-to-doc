@@ -6,17 +6,18 @@ Video-to-Doc — 视频下载、转写、总结一体化工具
   python main.py <本地文件路径>                    本地视频/音频文件
   python main.py <视频URL> --playlist              播放列表/合集
   python main.py <视频URL> --summary-style steps   指定总结风格
-  python main.py <视频URL> --translate             翻译转写为中文
+  python main.py <视频URL> --multi-speaker         多说话人识别
+  python main.py <视频URL> --translate             翻译转写
   python main.py <视频URL> --srt                   生成 SRT 字幕文件
-  python main.py <视频URL> --translate --srt       翻译 + 中文字幕
   python main.py --folder <文件夹路径>             批量处理文件夹内所有视频/音频
 
-总结风格选项:
+总结风格:
   auto             全面总结（默认）
   knowledge_points 提取知识点
   steps            提取操作步骤
   core_ideas       提炼核心观点
   expert           专家深度分析
+  custom           自定义提示词
 """
 import sys
 from pathlib import Path
@@ -111,9 +112,12 @@ def run_check(config: Dict[str, Any]) -> None:
         ok(f"API_KEY 已设置: {masked}")
 
         # 4b. API 连通性验证
+        from summarizer import API_PROVIDERS
         summarizer_cfg = config.get("summarizer", {})
-        base_url = summarizer_cfg.get("base_url", "https://api.deepseek.com")
-        model = summarizer_cfg.get("model", "deepseek-chat")
+        api_provider = summarizer_cfg.get("api_provider", "") or summarizer_cfg.get("provider", "")
+        preset = API_PROVIDERS.get(api_provider)
+        base_url = summarizer_cfg.get("base_url") or (preset["base_url"] if preset else "https://api.deepseek.com")
+        model = summarizer_cfg.get("model") or (preset["model"] if preset else "deepseek-v4-pro")
         try:
             from openai import OpenAI
             client = OpenAI(api_key=api_key, base_url=base_url, timeout=15)
@@ -175,17 +179,6 @@ def run_check(config: Dict[str, Any]) -> None:
         except ImportError:
             warn(f"依赖 {name} 未安装，请运行: pip install {name}")
 
-    # 7. 说话人分离（可选）
-    try:
-        __import__("pyannote.audio")
-        hf_token = os.environ.get("HF_TOKEN", config.get("diarization", {}).get("hf_token", ""))
-        if hf_token:
-            ok("说话人分离: pyannote 已安装，HF_TOKEN 已配置")
-        else:
-            info("说话人分离: pyannote 已安装，但 HF_TOKEN 未配置")
-    except ImportError:
-        info("说话人分离: 未安装 (可选: pip install pyannote.audio)")
-
     print()
     if all_ok:
         print("  环境就绪，可以开始使用。")
@@ -204,8 +197,9 @@ def main() -> None:
 示例:
   python main.py https://www.bilibili.com/video/BV1xx411x7xx
   python main.py C:/videos/myvideo.mp4
-  python main.py https://www.youtube.com/playlist?list=xxx --playlist
-  python main.py https://example.com/video --summary-style knowledge_points
+  python main.py https://example.com/video --multi-speaker
+  python main.py https://example.com/video --translate --srt
+  python main.py https://example.com/video --summary-style custom
         """,
     )
     parser.add_argument("url", nargs="?", help="视频 URL 或本地文件路径（--folder 模式下可省略）")
@@ -214,12 +208,12 @@ def main() -> None:
     parser.add_argument("--skip-download", action="store_true", help="跳过下载（已有视频文件）")
     parser.add_argument("--download-only", action="store_true", help="仅下载视频，不做转写和总结")
     parser.add_argument("--summary-style", default="auto",
-                        choices=["auto", "knowledge_points", "steps", "core_ideas", "expert"],
-                        help="总结风格 (默认: auto)")
+                        choices=["auto", "knowledge_points", "steps", "core_ideas", "expert", "custom"],
+                        help="总结风格 (默认: auto，custom 需在 config.yaml 中设置 custom_prompt)")
     parser.add_argument("--output-formats", default="md",
                         help="输出格式，逗号分隔: md,txt,html (默认: md)")
-    parser.add_argument("--diarize", action="store_true",
-                        help="启用说话人分离（需安装 pyannote.audio 并配置 HF_TOKEN）")
+    parser.add_argument("--multi-speaker", action="store_true",
+                        help="启用多说话人识别（抛光时由 LLM 自动识别说话人）")
     parser.add_argument("--translate", action="store_true",
                         help="翻译转写文本为目标语言（见 config.yaml → translation）")
     parser.add_argument("--srt", action="store_true",
@@ -248,8 +242,8 @@ def main() -> None:
     summarizer_cfg["output_formats"] = [
         f.strip() for f in args.output_formats.split(",") if f.strip()
     ]
-    if args.diarize:
-        config.setdefault("diarization", {})["enabled"] = True
+    if args.multi_speaker:
+        config.setdefault("summarizer", {})["multi_speaker"] = True
     if args.output_dir and args.output_dir.strip():
         config["output_dir"] = args.output_dir.strip()
 

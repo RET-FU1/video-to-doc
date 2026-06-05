@@ -8,9 +8,7 @@
 3. 设置模型缓存到项目目录
 4. 检查 ffmpeg 可用性
 5. 检查 GPU / CUDA 加速
-6. 检查说话人分离支持（可选）
 """
-import os
 import sys
 import subprocess
 import shutil
@@ -127,21 +125,6 @@ def step5_check_gpu():
         print("  未找到 nvidia-smi，将使用 CPU 转写")
 
 
-def step6_check_diarization():
-    """检查说话人分离支持（可选）"""
-    print("[6/6] 检查说话人分离支持（可选）...")
-
-    try:
-        import pyannote.audio
-        print("  pyannote.audio 已安装")
-    except ImportError:
-        print("  说话人分离未安装（可选）")
-        print("  安装命令: pip install pyannote.audio")
-        print("  配置步骤:")
-        print("    1. 在 .env 中设置 HF_TOKEN=你的_token")
-        print("    2. 在 config.yaml 中设置 diarization.enabled: true")
-
-
 def main():
     print("=" * 60)
     print("  Video-to-Doc 一键初始化")
@@ -154,7 +137,6 @@ def main():
         step3_download_model()
         step4_check_ffmpeg()
         step5_check_gpu()
-        step6_check_diarization()
     except subprocess.CalledProcessError as e:
         print(f"\n[ERROR] 步骤失败: {e}")
         sys.exit(1)
@@ -179,7 +161,7 @@ def main():
     print()
     print("  使用前请设置 .env:")
     print("    cp .env.example .env")
-    print("    编辑 .env 填入 API_KEY（AI 总结）和 HF_TOKEN（说话人分离，可选）")
+    print("    编辑 .env 填入 API_KEY（AI 总结）")
     print("=" * 60)
 
 

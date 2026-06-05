@@ -10,32 +10,29 @@ whisper:
   language: auto               # 转写语言，auto=自动检测
   device: cuda                  # cuda / cpu
   compute_type: float16         # float16（GPU）/ int8（CPU）
+  vad_enabled: true             # VAD 语音检测：自动跳过静音，提升速度，减少幻觉
+  initial_prompt: ""            # 初始提示词：告诉模型这段音频的主题，提高术语识别率
+                                #   例："这是一段关于机器学习和深度神经网络的技术讲座"
+  hotwords: ""                  # 热词增强：提高特定词汇的识别概率，逗号分隔
+                                #   例："DeepSeek,PyTorch,CTranslate2,联邦学习"
 
 # 总结设置
 summarizer:
-  provider: openai              # openai / ollama
-  base_url: https://api.deepseek.com  # API 地址（以下为常用国内服务商）
-                                  # DeepSeek:     https://api.deepseek.com
-                                  # 智谱:         https://open.bigmodel.cn/api/paas/v4
-                                  # 通义千问:     https://dashscope.aliyuncs.com/compatible-mode/v1
-                                  # 月之暗面:     https://api.moonshot.cn/v1
-  model: deepseek-v4-pro         # DeepSeek: deepseek-v4-pro / deepseek-v4-flash
-  polish_model: deepseek-v4-flash   # 标点分段专用模型（留空复用 model；若指定则需在当前服务商存在）
+  api_provider: deepseek         # API 服务商：deepseek / zhipu / tongyi / moonshot / ollama / mimo
+                                 # 选好服务商后 base_url 和 model 会自动填充，无需手动填
+  base_url: ""                   # 自定义 API 地址（留空则用预设，填了则覆盖预设）
+  model: ""                      # 自定义模型（留空则用预设，填了则覆盖预设）
+  polish_model: ""               # 标点分段专用模型（留空则复用 model）
   max_chunk_chars: 80000          # 分段阈值（字符数），超过此长度自动分段总结
   max_tokens: 4096               # 单次回复最大 token 数
-  summary_style: auto            # auto / knowledge_points / steps / core_ideas / expert
+  summary_style: auto            # 总结风格：auto / knowledge_points / steps / core_ideas / expert / custom
+                                  # custom 风格请在下方的 custom_prompt 中填写自定义提示词
+  custom_prompt: ""               # 自定义总结提示词（仅 summary_style=custom 时生效）
+  multi_speaker: false            # 多说话人识别：抛光时由 LLM 根据上下文自动识别说话人
   output_formats:                 # 输出格式（可多选）
     - md
     # - txt
     # - html
-
-# 说话人分离（可选，需安装 pyannote.audio）
-diarization:
-  enabled: false                 # true 启用
-  hf_token: ""                   # HuggingFace Token，也支持 .env 中 HF_TOKEN
-  min_speakers: 2                # 预估最少说话人数
-  max_speakers: 5                # 预估最多说话人数
-  min_turn_duration: 1.5         # 最短说话轮次（秒），短于此值的 pyannote turn 会平滑合并
 
 # 翻译（可选，用于外文视频输出汉化文档和字幕）
 translation:
@@ -50,13 +47,18 @@ subtitles:
     - zh-Hant
     - en
   prefer_manual: true            # true=优先人工字幕，质量更高
-  fallback_to_whisper: true      # true=字幕不可用或质量不达标时回退 Whisper
-  auto_subtitle:                 # 自动字幕质量阈值
+  auto_subtitle:                 # 自动字幕质量阈值（不达标时自动回退 Whisper）
     min_coverage: 0.50           # 最低覆盖率（0-1），低于此值回退 Whisper
     max_noise_ratio: 0.10        # 最大噪音占比（0-1），[Music] 等非语音标签比例
 
 # 下载设置
 downloader:
-  format: bestvideo[height<=1080]+bestaudio/best  # 视频质量
+  quality: best                 # 视频清晰度：best / 2160p / 1080p / 720p / 480p / 360p / audio
+  format: ""                    # 高级自定义：yt-dlp 格式串（留空则用 quality），例: bestvideo[height<=1080]+bestaudio/best
   cookies_file: ""              # Cookie 文件路径（如需下载会员视频）
+  proxy: ""                     # 代理地址，留空则不使用（例: http://127.0.0.1:7890）
   timeout: 7200                 # 下载超时（秒），默认 2 小时
+  max_download_attempts: 3      # 下载失败最大重试次数
+  retries: 30                   # yt-dlp 内部重试次数（网络不稳定时加大）
+  fragment_retries: 50          # 分片下载重试次数
+  socket_timeout: 60            # Socket 超时（秒）

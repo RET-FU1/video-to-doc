@@ -7,13 +7,15 @@
 - **图形界面** — 双击启动，粘贴链接即可，支持实时彩色日志、随时停止
 - **自动环境** — 自动使用项目虚拟环境，无需手动激活
 - **字幕优先** — 优先提取视频平台字幕（YouTube/B站），质量达标则跳过 Whisper 转写，大幅节省时间
-- **语音转文字** — 基于 faster-whisper，本地 GPU 加速，无需联网；字幕不可用时自动回退
+- **语音转文字** — 基于 faster-whisper，本地 GPU 加速（CTranslate2），VAD 自动跳过静音提速，支持热词增强和初始提示词
+- **字幕优先** — 优先提取视频平台字幕（YouTube/B站），质量达标则跳过 Whisper 转写，大幅节省时间
+- **章节提取** — 自动提取视频章节标记（YouTube/B站），注入转写文档作为分段标题
 - **标点与分段** — LLM 自动为转写文本添加标点符号并按语义分段
-- **翻译** — 外文视频自动翻译为中文，生成汉化文档
-- **字幕生成** — 生成 SRT 字幕文件，可配合翻译生成中文字幕
-- **说话人分离** — 可选 pyannote.audio，区分多人对话并标记发言人，内置交替噪声平滑
-- **AI 总结** — 兼容 OpenAI 接口（默认 DeepSeek），5 种总结风格，强调准确性，忠于原文不编造
-- **多格式输出** — 转写和总结可按需输出 `.md` `.txt` `.html`，HTML 支持暗色模式、TOC 导航、自适应全宽
+- **多说话人识别** — 抛光时由 LLM 根据对话上下文自动识别不同说话人并标注，无需额外依赖
+- **翻译** — 外文视频翻译为目标语言，生成汉化文档
+- **字幕生成** — 生成 SRT 字幕文件，可配合翻译生成目标语言字幕
+- **AI 总结** — 兼容 OpenAI 接口（支持 DeepSeek、MiMo、智谱、通义千问、月之暗面、Ollama），6 种总结风格（含自定义提示词，GUI 可直接输入），忠于原文不编造
+- **多格式输出** — 转写和总结可按需输出 `.md` `.txt` `.html`，HTML 支持暗色模式、TOC 导航
 - **播放列表** — 支持 B站合集、YouTube 播放列表等批量处理
 - **断点续跑** — 中断后重新运行自动跳过已完成步骤
 - **环境诊断** — `python main.py --check` 一键检查 ffmpeg、模型、API、GPU
@@ -43,6 +45,7 @@ sudo apt install ffmpeg
 ### 2. 克隆并初始化
 
 ```bash
+git clone <repo-url> video-to-doc
 cd video-to-doc
 python setup.py
 ```
@@ -63,36 +66,29 @@ API_KEY=sk-your-api-key
 
 AI 总结和标点分段功能依赖 API。转写功能不依赖 API（仅 faster-whisper 本地运行）。
 
-默认使用 **DeepSeek** API（国内可直接访问，[获取 Key](https://platform.deepseek.com/api_keys)）。在 `config.yaml` 的 `summarizer` 段可切换其他服务商：
+默认使用 **DeepSeek** API（国内可直接访问，[获取 Key](https://platform.deepseek.com/api_keys)）。在 `config.yaml` 中改 `api_provider` 即可切换服务商：
 
-| 服务商 | base_url | model 示例 |
-|--------|----------|-----------|
-| **DeepSeek**（默认） | `https://api.deepseek.com` | `deepseek-v4-pro` / `deepseek-v4-flash` |
-| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-flash` |
-| 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-turbo` |
-| 月之暗面 | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
-| Ollama 本地 | `http://localhost:11434/v1` | 本地模型名 |
+```yaml
+summarizer:
+  api_provider: deepseek   # 可选: deepseek / mimo / zhipu / tongyi / moonshot / ollama
+```
+
+选好服务商后 `base_url` 和 `model` 会自动填充。也可以手动覆盖。
 
 ### 4. 使用
 
 **图形界面（推荐）：**
 
-Windows 双击 `启动.vbs`（无窗口）或 `启动.bat`（有终端），或直接：
-
 ```bash
 python gui.py
 ```
 
-程序自动检测并使用项目虚拟环境，无需手动激活。
-
 GUI 操作：
 - 输入框填写视频链接、本地文件路径或文件夹路径（每行一个）
-- 右键输入框可粘贴、复制、剪切，支持键盘快捷键
-- 勾选模式：播放列表/合集、文件夹模式、仅下载、说话人分离、翻译、字幕、跳过总结
-- 选择总结风格和输出格式
-- 设置输出目录（或点击"浏览..."选择）
+- 右键输入框可粘贴、复制、剪切
+- 勾选模式：播放列表、文件夹模式（互斥）、仅下载、多说话人识别、翻译、字幕、跳过总结
+- 选择总结风格——选"自定义"时显示提示词输入框，可直接在界面中编写
 - 点"开始处理"，日志区实时显示进度
-- 点"打开输出目录"查看结果
 
 **命令行：**
 
@@ -102,7 +98,6 @@ python main.py "https://www.bilibili.com/video/BV1xx411x7xx"
 
 # 本地视频/音频文件
 python main.py "C:/videos/myvideo.mp4"
-python main.py "C:/audio/podcast.mp3"
 
 # 文件夹批量处理
 python main.py --folder "C:/videos/教程合集"
@@ -110,29 +105,17 @@ python main.py --folder "C:/videos/教程合集"
 # 播放列表
 python main.py "https://www.youtube.com/playlist?list=xxx" --playlist
 
-# 仅下载，不做转写
-python main.py "https://example.com/video" --download-only
+# 多说话人识别
+python main.py "https://example.com/video" --multi-speaker
 
 # 指定总结风格
-python main.py "https://example.com/video" --summary-style knowledge_points
+python main.py "https://example.com/video" --summary-style expert
 
-# 指定输出格式
-python main.py "https://example.com/video" --output-formats md,txt,html
-
-# 自定义输出目录
-python main.py "https://example.com/video" -o ./my-output
-
-# 翻译 + 生成中文字幕
+# 翻译 + 生成字幕
 python main.py "https://example.com/video" --translate --srt
 
 # 仅转写，跳过总结
 python main.py "https://example.com/video" --skip-summary
-
-# 启用说话人分离
-python main.py "https://example.com/video" --diarize
-
-# 指定视频文件路径（下载器自动检测已下载状态并跳过）
-python main.py "./output/视频标题/视频标题.mp4"
 
 # 环境诊断
 python main.py --check
@@ -140,20 +123,17 @@ python main.py --check
 
 ## 输出结构
 
-**单视频：**
-
 ```
 output/
 └── {标题}/
     ├── {标题}.mp4         # 原始视频（在线）或副本（本地）
-    ├── {标题}.md          # 转写文档（已加标点分段，仅选中 md 时）
+    ├── {标题}.md          # 转写文档（已加标点分段）
     ├── {标题}.html        # 转写文档（仅选中 html 时）
     ├── {标题}.srt         # SRT 字幕（启用字幕时）
-    ├── {标题}-总结.md      # AI 总结（仅选中 md 时）
-    └── {标题}-总结.html    # AI 总结（仅选中 html 时）
+    └── 总结-{标题}.md      # AI 总结
 ```
 
-中间文件（`.txt`、`.pipeline_state`、`_segments.json`、`_subtitle.srt`、`_subtitle_info.json`、`_zh.txt`）在任务完成后自动清理。
+中间文件（`.txt`、`_segments.json`、`_subtitle.srt`、`_subtitle.vtt`、`_subtitle_info.json`、`_zh.txt`）在任务完成后自动清理。
 
 **播放列表 / 文件夹批量处理：**
 
@@ -162,29 +142,25 @@ output/
 └── {合集或文件夹名}/
     ├── {视频1标题}/
     │   ├── {视频1标题}.md
-    │   ├── {视频1标题}-总结.md
-    │   └── ...
+    │   └── 总结-{视频1标题}.md
     ├── {视频2标题}/
     │   └── ...
     ├── 转写汇总/          # 所有视频的转写文件集中于此
-    │   ├── {视频1标题}.md
-    │   └── {视频2标题}.md
     └── 总结汇总/          # 所有视频的总结文件集中于此
-        ├── {视频1标题}-总结.md
-        └── {视频2标题}-总结.md
 ```
-
-所有文件均以视频标题命名，可直接拷贝汇总管理而不会重名覆盖。
 
 ## 总结风格
 
 | 风格 | CLI 参数 | 说明 |
 |------|---------|------|
-| 全面总结 | `auto` | 精炼文章式总结：核心观点 → 论证展开 → 关键收获（默认） |
+| 全面总结 | `auto` | 精炼文章式：核心观点 → 论证展开 → 关键收获（默认） |
 | 知识点提取 | `knowledge_points` | 结构化列出全部知识点，含概念解释、重要性说明、原文例子 |
 | 操作步骤 | `steps` | 按顺序拆解步骤：做什么、为什么必要、怎么做、常见坑点 |
 | 核心观点 | `core_ideas` | 洞察提炼：拒绝话题罗列，每条都是让人「原来如此」的观点 |
-| 专家深度 | `expert` | 世界级专家视角，自我核查事实，锐利批判思维，不编造不逢迎 |
+| 专家深度 | `expert` | 世界级专家视角，自我核查事实，锐利批判思维 |
+| 自定义 | `custom` | 在 `config.yaml` 的 `custom_prompt` 中编写自己的提示词 |
+
+在 GUI 中选择"自定义"时会显示提示词输入框，可直接在界面中编写。
 
 ## 支持的格式
 
@@ -202,121 +178,66 @@ output/
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `output_dir` | 输出目录（CLI 可用 `-o` 覆盖） | `./output` |
-| `whisper.language` | 转写语言 | `auto`（自动检测） |
+| `whisper.language` | 转写语言 | `auto` |
 | `whisper.device` | 推理设备 | `cuda` |
 | `whisper.compute_type` | 精度 | `float16`（GPU）/ `int8`（CPU） |
-| `summarizer.provider` | API 类型 | `openai` |
-| `summarizer.base_url` | API 地址 | DeepSeek |
-| `summarizer.model` | 模型名 | `deepseek-v4-pro` |
-| `summarizer.polish_model` | 标点分段专用模型，留空复用 model | `deepseek-v4-flash` |
+| `whisper.vad_enabled` | VAD 语音检测，自动跳过静音 | `true` |
+| `whisper.initial_prompt` | 初始提示词，帮助识别专业术语 | 空 |
+| `whisper.hotwords` | 热词增强，逗号分隔 | 空 |
+| `summarizer.api_provider` | API 服务商 | `deepseek` |
+| `summarizer.base_url` | 自定义 API 地址（留空用预设） | 空 |
+| `summarizer.model` | 自定义模型（留空用预设） | 空 |
+| `summarizer.polish_model` | 标点分段专用模型（留空复用 model） | 空 |
 | `summarizer.max_chunk_chars` | 长文本分段阈值 | `80000` |
 | `summarizer.max_tokens` | 单次回复最大 token | `4096` |
 | `summarizer.timeout` | API 超时（秒） | `300` |
 | `summarizer.max_retries` | API 失败重试次数 | `3` |
 | `summarizer.summary_style` | 默认总结风格 | `auto` |
+| `summarizer.custom_prompt` | 自定义总结提示词 | 空 |
+| `summarizer.multi_speaker` | 多说话人识别 | `false` |
 | `summarizer.output_formats` | 输出格式 | `[md]` |
+| `translation.target_lang` | 翻译目标语言 | `zh` |
 | `subtitles.enabled` | 优先提取视频平台字幕 | `true` |
 | `subtitles.languages` | 字幕语言优先级 | `[zh, zh-Hans, zh-Hant, en]` |
-| `subtitles.fallback_to_whisper` | 字幕不可用时回退 Whisper | `true` |
+| `subtitles.prefer_manual` | 优先人工字幕 | `true` |
 | `subtitles.auto_subtitle.min_coverage` | 自动字幕最低覆盖率 | `0.50` |
 | `subtitles.auto_subtitle.max_noise_ratio` | 自动字幕最大噪音占比 | `0.10` |
-| `diarization.enabled` | 启用说话人分离 | `false` |
-| `diarization.min_speakers` | 最少说话人数 | `2` |
-| `diarization.max_speakers` | 最多说话人数 | `5` |
-| `diarization.min_turn_duration` | 最短说话轮次（秒），短于此值平滑合并 | `1.5` |
-| `translation.target_lang` | 翻译目标语言 | `zh`（中文） |
-| `translation.model` | 翻译专用模型，留空复用 `summarizer.model` | 空 |
-| `downloader.format` | 视频质量 | `bestvideo[height<=1080]+bestaudio/best` |
+| `downloader.quality` | 视频清晰度预设 | `best` |
+| `downloader.format` | 高级自定义 yt-dlp 格式串（留空用 quality） | 空 |
 | `downloader.cookies_file` | Cookie 文件路径 | 空 |
+| `downloader.proxy` | 代理地址 | 空 |
 | `downloader.timeout` | 下载超时（秒） | `7200` |
 
-## 说话人分离（可选）
+### API 服务商预设
 
-自动区分多人对话并标记发言人（如 SPEAKER_00、SPEAKER_01）。每个片段附带时间戳。
+| `api_provider` | 服务商 | 说明 |
+|---|---|---|
+| `deepseek` | DeepSeek | 推荐，国内直连，充值 10 元用很久 |
+| `mimo` | 小米 MiMo | 1M 上下文，性价比高 |
+| `zhipu` | 智谱 GLM | 有免费额度 |
+| `tongyi` | 通义千问 | 有免费额度 |
+| `moonshot` | 月之暗面 | |
+| `ollama` | Ollama 本地 | 需先安装 Ollama，免费 |
 
-### 前置条件
+### 视频清晰度预设
 
-说话人分离需要 HuggingFace 账号和 Token。**无需付费**，全程约 3 分钟完成一次性配置。
-
-### 第 1 步：获取 HuggingFace Token
-
-1. 访问 [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) 注册/登录
-2. 点击 **"Create new token"**，类型选 **Read**，名称随意
-3. 复制生成的 token（格式 `hf_xxx...`），写入项目 `.env` 文件：
-   ```
-   HF_TOKEN=hf_xxx
-   ```
-
-### 第 2 步：接受模型用户协议（3 个）
-
-说话人分离依赖 3 个模型，**每个都需要单独在网页上点击"Agree"**：
-
-| 模型 | 授权页面 | 说明 |
-|------|---------|------|
-| speaker-diarization-3.1 | [打开页面](https://huggingface.co/pyannote/speaker-diarization-3.1) | 主说话人分离模型 |
-| segmentation-3.0 | [打开页面](https://huggingface.co/pyannote/segmentation-3.0) | 语音活动检测（VAD） |
-| speaker-diarization-community-1 | [打开页面](https://huggingface.co/pyannote/speaker-diarization-community-1) | 说话人嵌入聚类 |
-
-> 每个页面点击 **"Agree and access repository"** 即可。姓名、机构随意填写，不会被验证。
-
-**注意**：程序启动时会自动检查这 3 个模型的授权状态。未授权时会在日志中给出明确提示和对应链接，不会静默失败。
-
-### 第 3 步：安装依赖
-
-```bash
-pip install pyannote.audio
-```
-
-### 第 4 步：启用
-
-在 `config.yaml` 中：
-
-```yaml
-diarization:
-  enabled: true
-  hf_token: ""              # 留空则从 .env 的 HF_TOKEN 读取
-  min_speakers: 2           # 预估最少说话人数
-  max_speakers: 5           # 预估最多说话人数
-```
-
-或在命令行添加 `--diarize` 参数临时启用。
-
-### 输出示例
-
-```markdown
-# 视频标题
-
-## SPEAKER_00 (00:00:00.000 - 00:01:23.456)
-主持人开场介绍今天的主题。
-
-## SPEAKER_01 (00:01:23.456 - 00:03:45.678)
-我来分享一下技术架构的设计思路。
-```
-
-### 故障排查
-
-**Q: 提示"模型尚未授权"？**
-A: 检查是否遗漏了某个模型的协议（共 3 个，见上表）。日志中会给出具体是哪个模型和授权链接。
-
-**Q: 前置检查失败但转写仍然继续？**
-A: 这是预期行为。说话人分离是可选的增强功能，配置不完整时会自动回退到基础转写，不会影响转写本身。
-
-**Q: 说话人标签为什么是 SPEAKER_00 而非真实人名？**
-A: pyannote 只能区分"不同的人"，无法识别具体身份。要标注真实人名需要提前注册声纹样本（说话人识别），这是另一个领域的功能。
-
-**Q: 两人同时说话能分开吗？**
-A: 不能。重叠语音分离（speech separation）是目前学术界的开放难题，pyannote 不支持。
-
-**Q: 短句或背景噪音大时说话人标错？**
-A: 可尝试调整 `min_speakers` / `max_speakers` 参数。单人视频设 `max_speakers: 1` 可避免过度切分。
+| `quality` | 说明 |
+|---|---|
+| `best` | 最高画质（不做限制） |
+| `2160p` | 4K 以内 |
+| `1080p` | 1080p 以内 |
+| `720p` | 720p 以内 |
+| `480p` | 480p 以内 |
+| `360p` | 360p 以内 |
+| `audio` | 仅音频（不下载视频画面） |
 
 ## 常见问题
 
 **Q: 启动 GUI 无反应？**
-A: 确保已运行 `python setup.py` 完成初始化（创建 venv + 安装依赖）。用命令行 `python gui.py` 启动可看到错误信息。程序会自动在项目 venv 中运行。
+A: 确保已运行 `python setup.py` 完成初始化。用命令行 `python gui.py` 启动可看到错误信息。
 
 **Q: GPU 不可用？**
-A: 自动回退到 CPU 并在日志中显示具体原因（如缺少 cuBLAS DLL、驱动版本不匹配等）。常见解决：确保 NVIDIA 驱动已安装，运行 `python main.py --check` 诊断。
+A: 自动回退到 CPU。运行 `python main.py --check` 诊断。确保 NVIDIA 驱动已安装。
 
 **Q: 下载失败？**
 A: 更新 yt-dlp：`venv/Scripts/pip install -U yt-dlp`
@@ -324,20 +245,31 @@ A: 更新 yt-dlp：`venv/Scripts/pip install -U yt-dlp`
 **Q: B站视频下载失败？**
 A: 在 `config.yaml` 中设置 `downloader.cookies_file` 指向浏览器导出的 cookies.txt
 
-**Q: 播放列表只下载了第一个？**
-A: 确保加了 `--playlist` 参数，或在 GUI 中勾选"播放列表/合集"。
+**Q: B站字幕没有生效？**
+A: B站字幕需要登录后才可用。导出浏览器 cookies 并配置 `downloader.cookies_file`，程序会提示具体原因。
 
 **Q: 转写文本标点不准？**
-A: 标点由 LLM 自动添加，默认使用与总结相同的模型。可在 `config.yaml` 中设置 `summarizer.polish_model` 切换专用模型（推荐 flash 等便宜模型降成本），或更换 `summarizer.model` 提高质量。纯本地转写不含标点。
+A: 标点由 LLM 自动添加。可在 `config.yaml` 中设置 `summarizer.polish_model` 切换模型。
+
+**Q: 多说话人识别效果不好？**
+A: 多说话人识别由 LLM 根据对话上下文判断，不依赖声学特征。对问答式对话效果好，对多人同时说话或简短交替效果有限。可在 GUI 中随时开关。
+
+**Q: 如何提高专业术语的识别准确率？**
+A: 在 `config.yaml` 的 `whisper.initial_prompt` 中描述音频主题（如"关于深度学习的讲座"），或设置 `whisper.hotwords` 列出专有名词（如"DeepSeek,PyTorch,CTranslate2"）。
+
+**Q: 转写速度能优化吗？**
+A: VAD 语音检测默认开启，可自动跳过静音段提速 20-40%。如不需要可设置 `whisper.vad_enabled: false`。
+
+**Q: 视频的章节标记会保留吗？**
+A: 会。YouTube/B站视频的章节会自动提取并注入到转写文档中作为 `## 章节标题` 分段标记。
 
 ## 技术栈
 
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — 视频下载
-- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — 语音转文字（CTranslate2 推理引擎）
-- [pyannote.audio](https://github.com/pyannote/pyannote-audio) — 说话人分离（可选）
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — 语音转文字（CTranslate2 推理引擎，GPU/CPU 自适应）
 - [ModelScope](https://modelscope.cn) — 模型下载
-- OpenAI 兼容 API — LLM 标点分段 + AI 总结（默认 DeepSeek）
-- [md2html](https://github.com/haidang1810/md2html) — HTML 输出模板（暗色模式、TOC 侧栏、代码复制）
+- OpenAI 兼容 API — LLM 标点分段 + 多说话人识别 + AI 总结
+- [mistune](https://github.com/lepture/mistune) — Markdown → HTML 渲染
 - tkinter — 图形界面（Python 内置）
 
 ## 许可

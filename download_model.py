@@ -5,7 +5,6 @@ r"""
   venv\Scripts\python download_model.py --source huggingface  # HuggingFace
 """
 import argparse
-import os
 import sys
 from pathlib import Path
 

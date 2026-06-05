@@ -57,8 +57,10 @@ def parse_subtitle_file(path: Path) -> List[Dict]:
 
 
 def assess_quality(segments: List[Dict], video_duration: float,
-                   source: str, expected_lang: str) -> SubtitleQuality:
-    """多维度评估字幕质量"""
+                   source: str, expected_lang: str,
+                   min_coverage: float = 0.50,
+                   max_noise_ratio: float = 0.10) -> SubtitleQuality:
+    """多维度评估字幕质量。阈值可通过 config.yaml → subtitles.auto_subtitle 配置"""
     details: List[str] = []
 
     if not segments:
@@ -93,14 +95,14 @@ def assess_quality(segments: List[Dict], video_duration: float,
     # 判断
     if source == "manual":
         # 人工字幕：仅检查覆盖率
-        is_ok = coverage >= 0.50
+        is_ok = coverage >= min_coverage
         if not is_ok:
-            details.append("人工字幕覆盖率不足 (需>50%)")
+            details.append(f"人工字幕覆盖率不足 (需>{min_coverage:.0%})")
     else:
         # 自动字幕：全维度检查
         checks = [
-            (coverage >= 0.50, f"覆盖率不足 ({coverage:.0%}, 需>50%)"),
-            (noise_ratio <= 0.10, f"噪音过高 ({noise_ratio:.0%}, 需<10%)"),
+            (coverage >= min_coverage, f"覆盖率不足 ({coverage:.0%}, 需>{min_coverage:.0%})"),
+            (noise_ratio <= max_noise_ratio, f"噪音过高 ({noise_ratio:.0%}, 需<{max_noise_ratio:.0%})"),
             (1.0 <= density <= 15.0, f"段落密度异常 ({density:.1f}, 需1-15)"),
             (lang_match >= 0.30, f"语言匹配度低 ({lang_match:.0%}, 需>30%)"),
         ]

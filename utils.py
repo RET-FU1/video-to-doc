@@ -288,11 +288,6 @@ def validate_config(config: dict) -> List[str]:
         if not isinstance(max_tok, (int, float)) or max_tok < 256:
             errors.append(f"summarizer.max_tokens 值无效，应为 >= 256 的整数")
 
-    diar = config.get("diarization", {})
-    if isinstance(diar, dict) and diar.get("enabled"):
-        if diar.get("min_speakers", 0) > diar.get("max_speakers", 999):
-            errors.append("diarization.min_speakers 不能大于 max_speakers")
-
     dl = config.get("downloader", {})
     if isinstance(dl, dict):
         timeout = dl.get("timeout", 7200)

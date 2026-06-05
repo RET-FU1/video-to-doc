@@ -117,7 +117,8 @@ class App:
             self.playlist_cb = tk.Checkbutton(row1, text="播放列表/合集", variable=self.playlist_var,
                            font=F["body"], bg=C["card"],
                            activebackground=C["card"],
-                           selectcolor=C["card"])
+                           selectcolor=C["card"],
+                           command=self._on_playlist_toggle)
             self.playlist_cb.pack(side="left")
 
             self.folder_var = tk.BooleanVar()
@@ -136,12 +137,12 @@ class App:
                            command=self._on_dlonly_toggle)
             self.dlonly_cb.pack(side="left", padx=(12, 0))
 
-            self.diarize_var = tk.BooleanVar()
-            self.diarize_cb = tk.Checkbutton(row1, text="说话人分离", variable=self.diarize_var,
+            self.multi_speaker_var = tk.BooleanVar()
+            self.multi_speaker_cb = tk.Checkbutton(row1, text="多说话人识别", variable=self.multi_speaker_var,
                            font=F["body"], bg=C["card"],
                            activebackground=C["card"],
                            selectcolor=C["card"])
-            self.diarize_cb.pack(side="left", padx=(12, 0))
+            self.multi_speaker_cb.pack(side="left", padx=(12, 0))
 
             self.translate_var = tk.BooleanVar()
             self.translate_cb = tk.Checkbutton(row1, text="翻译", variable=self.translate_var,
@@ -170,13 +171,14 @@ class App:
             tk.Label(row2, text="总结风格：", font=F["body"],
                      fg=C["text"], bg=C["card"]).pack(side="left")
 
-            self.style_labels = ["全面总结", "知识点提取", "操作步骤", "核心观点", "专家深度"]
+            self.style_labels = ["全面总结", "知识点提取", "操作步骤", "核心观点", "专家深度", "自定义"]
             self.style_map = {
                 "全面总结": "auto",
                 "知识点提取": "knowledge_points",
                 "操作步骤": "steps",
                 "核心观点": "core_ideas",
                 "专家深度": "expert",
+                "自定义": "custom",
             }
 
             self.style_var = tk.StringVar(value="全面总结")
@@ -191,9 +193,19 @@ class App:
                                        font=F["small"], fg=C["muted"], bg=C["card"])
             self.style_desc.pack(side="left", padx=(6, 0))
 
-            row3 = tk.Frame(card, bg=C["card"])
-            row3.pack(fill="x")
-            tk.Label(row3, text="输出格式：", font=F["body"],
+            # 自定义提示词输入框（选择"自定义"时显示）
+            self.custom_prompt_frame = tk.Frame(card, bg=C["card"])
+            tk.Label(self.custom_prompt_frame, text="自定义提示词：", font=F["body"],
+                     fg=C["text"], bg=C["card"]).pack(anchor="w")
+            self.custom_prompt_text = tk.Text(self.custom_prompt_frame, height=6,
+                                              font=F["body"], wrap="word",
+                                              relief="solid", borderwidth=1,
+                                              padx=6, pady=4)
+            self.custom_prompt_text.pack(fill="x", pady=(4, 0))
+
+            self._row3 = tk.Frame(card, bg=C["card"])
+            self._row3.pack(fill="x")
+            tk.Label(self._row3, text="输出格式：", font=F["body"],
                      fg=C["text"], bg=C["card"]).pack(side="left")
 
             self.fmt_md = tk.BooleanVar(value=True)
@@ -201,7 +213,7 @@ class App:
             self.fmt_html = tk.BooleanVar(value=False)
             self.fmt_cbs = []
             for v, lb in [(self.fmt_md, ".md"), (self.fmt_txt, ".txt"), (self.fmt_html, ".html")]:
-                cb = tk.Checkbutton(row3, text=lb, variable=v, font=F["body"],
+                cb = tk.Checkbutton(self._row3, text=lb, variable=v, font=F["body"],
                                bg=C["card"], activebackground=C["card"],
                                selectcolor=C["card"])
                 cb.pack(side="left", padx=(12, 0))
@@ -308,10 +320,23 @@ class App:
         # 也支持 Mac 的 Ctrl+Click
         widget.bind("<Control-Button-1>", _show_menu)
 
+    def _on_playlist_toggle(self):
+        """播放列表和文件夹模式互斥"""
+        if self.playlist_var.get():
+            self.folder_var.set(False)
+            self.folder_cb.configure(state="disabled")
+        else:
+            self.folder_cb.configure(state="normal")
+
     def _on_folder_toggle(self):
+        """文件夹模式和播放列表互斥，文件夹模式下自动关仅下载"""
         if self.folder_var.get():
+            self.playlist_var.set(False)
+            self.playlist_cb.configure(state="disabled")
             self.dlonly_var.set(False)
             self._on_dlonly_toggle()
+        else:
+            self.playlist_cb.configure(state="normal")
 
     def _on_dlonly_toggle(self):
         dlonly = self.dlonly_var.get()
@@ -319,7 +344,7 @@ class App:
             self.folder_var.set(False)
         state = "disabled" if dlonly else "normal"
         readonly = "disabled" if dlonly else "readonly"
-        for w in (self.folder_cb, self.diarize_cb,
+        for w in (self.folder_cb, self.multi_speaker_cb,
                   self.translate_cb, self.srt_cb, self.nosummary_cb):
             w.configure(state=state)
         self.style_combo.configure(state=readonly)
@@ -339,9 +364,14 @@ class App:
             "操作步骤": "— 步骤拆解：做什么 + 为什么必要 + 怎么做 + 坑点",
             "核心观点": "— 洞察提炼：拒绝话题罗列，每条都是「原来如此」",
             "专家深度": "— 世界级专家视角，自我核查事实，锐利批判思维",
+            "自定义": "— 在下方输入框中编写你自己的总结提示词",
         }
         label = self.style_var.get()
         self.style_desc.configure(text=descs.get(label, ""))
+        if label == "自定义":
+            self.custom_prompt_frame.pack(fill="x", pady=(8, 0), before=self._row3)
+        else:
+            self.custom_prompt_frame.pack_forget()
 
     # ------------------------------------------------------------------
     # 日志
@@ -421,9 +451,13 @@ class App:
 
         summarizer_cfg = config.setdefault("summarizer", {})
         summarizer_cfg["summary_style"] = style_eng
+        if style_eng == "custom":
+            custom_prompt = self.custom_prompt_text.get("1.0", "end-1c").strip()
+            if custom_prompt:
+                summarizer_cfg["custom_prompt"] = custom_prompt
         summarizer_cfg["output_formats"] = formats
-        if self.diarize_var.get():
-            config.setdefault("diarization", {})["enabled"] = True
+        if self.multi_speaker_var.get():
+            config.setdefault("summarizer", {})["multi_speaker"] = True
         output_dir = self.output_dir_var.get().strip()
         if output_dir:
             config["output_dir"] = output_dir

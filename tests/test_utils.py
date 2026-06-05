@@ -159,14 +159,6 @@ class TestValidateConfig:
         errors = validate_config(config)
         assert any("max_tokens" in e for e in errors)
 
-    def test_diarization_speaker_range(self):
-        config = {
-            "output_dir": "./out",
-            "summarizer": {"provider": "openai", "model": "m"},
-            "diarization": {"enabled": True, "min_speakers": 5, "max_speakers": 2},
-        }
-        errors = validate_config(config)
-        assert any("min_speakers" in e for e in errors)
 
     def test_invalid_downloader_timeout(self):
         config = {

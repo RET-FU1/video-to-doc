@@ -1,6 +1,6 @@
 """
-音频转文字模块 — faster-whisper + 可选 pyannote 说话人分离
-从视频提取音频后转写为 Markdown 文档
+音频转文字模块 — faster-whisper 转写
+从视频提取音频后转写为文本
 """
 import gc
 import json
@@ -28,7 +28,6 @@ class Transcriber:
         self.config: Dict[str, Any] = config
         self.output_root: Path = Path(output_root)
         self.whisper_config: Dict[str, Any] = config.get("whisper", {})
-        self.diar_config: Dict[str, Any] = config.get("diarization", {})
         self._model: Optional[Any] = None
         self._model_cache: Path = PROJECT_ROOT / "models"
 
@@ -108,64 +107,6 @@ class Transcriber:
         msg = str(error).lower()
         return any(keyword in msg for keyword in _GPU_ERROR_KEYWORDS)
 
-    # ---- 说话人分离前置检查 ----
-
-    def _preflight_diarization(self) -> bool:
-        """前置检查：HF_TOKEN + 模型可访问性。返回 True=通过，False=回退基础转写。"""
-        hf_token: str = (self.diar_config.get("hf_token") or
-                          os.environ.get("HF_TOKEN", ""))
-
-        if not hf_token:
-            logger.warning(
-                "未配置 HF_TOKEN，说话人分离将被跳过。\n"
-                "  获取步骤：\n"
-                "  1. 访问 https://huggingface.co/settings/tokens\n"
-                "  2. 登录后点击 \"Create new token\"，类型选 Read\n"
-                "  3. 将生成的 token 写入 .env 文件：HF_TOKEN=hf_xxx\n"
-                "  详情见 README.md → 说话人分离"
-            )
-            return False
-
-        required_models = [
-            ("pyannote/speaker-diarization-3.1",
-             "https://huggingface.co/pyannote/speaker-diarization-3.1"),
-            ("pyannote/segmentation-3.0",
-             "https://huggingface.co/pyannote/segmentation-3.0"),
-            ("pyannote/speaker-diarization-community-1",
-             "https://huggingface.co/pyannote/speaker-diarization-community-1"),
-        ]
-
-        try:
-            from huggingface_hub import HfApi
-        except ImportError:
-            logger.warning("huggingface_hub 未安装，跳过模型访问检查")
-            return True
-
-        from huggingface_hub.errors import RevisionNotFoundError
-
-        api = HfApi()
-        for model_id, url in required_models:
-            try:
-                api.model_info(model_id, token=hf_token)
-            except RevisionNotFoundError:
-                pass
-            except Exception as e:
-                msg = str(e).lower()
-                if any(kw in msg for kw in ("403", "401", "access", "unauthorized", "gated")):
-                    logger.warning(
-                        "模型 %s 尚未授权，说话人分离将被跳过。\n"
-                        "  解决：访问 %s\n"
-                        "  点击 \"Agree and access repository\" 接受用户协议\n"
-                        "  （姓名、机构可随意填写）\n"
-                        "  注意：每个模型需单独授权，共 3 个",
-                        model_id, url
-                    )
-                    return False
-                logger.debug("检查模型 %s 时出现网络问题: %s", model_id, e)
-
-        logger.info("说话人分离前置检查通过")
-        return True
-
     # ---- 主入口 ----
 
     def transcribe(self, input_path: str, output_folder: str) -> Path:
@@ -185,19 +126,6 @@ class Transcriber:
         file_type: str = "音频" if input_path.suffix.lower() in AUDIO_EXTS else "视频"
         logger.info("转写中 (%s): %s", file_type, safe_name)
 
-        # 说话人分离路径
-        if self.diar_config.get("enabled", False):
-            if self._preflight_diarization():
-                try:
-                    return self._transcribe_with_diarization(
-                        input_path, output_folder, safe_name
-                    )
-                except Exception as e:
-                    logger.warning("pyannote 说话人分离失败，回退到基础转写: %s", e)
-            else:
-                logger.warning("说话人分离前置检查未通过，回退到基础转写")
-
-        # 基础转写路径（faster-whisper）
         with self._ensure_audio(input_path, output_folder) as audio_path:
             return self._run_transcription(audio_path, safe_name, transcript_path, output_folder)
 
@@ -210,7 +138,27 @@ class Transcriber:
             language = None
 
         def _do_transcribe(m):
-            return m.transcribe(str(audio_path), language=language, word_timestamps=True)
+            kwargs = {"language": language, "word_timestamps": True}
+
+            # VAD 语音检测：自动跳过静音，提升速度减少幻觉
+            if self.whisper_config.get("vad_enabled", True):
+                kwargs["vad_filter"] = True
+                kwargs["vad_parameters"] = {
+                    "min_silence_duration_ms": 500,
+                    "speech_pad_ms": 400,
+                }
+
+            # 初始提示词：帮助模型理解主题，提高术语识别率
+            prompt = self.whisper_config.get("initial_prompt", "").strip()
+            if prompt:
+                kwargs["initial_prompt"] = prompt
+
+            # 热词增强：提高特定词汇的识别概率
+            hotwords = self.whisper_config.get("hotwords", "").strip()
+            if hotwords:
+                kwargs["hotwords"] = hotwords
+
+            return m.transcribe(str(audio_path), **kwargs)
 
         def _collect_segments(segs) -> List[Dict[str, Any]]:
             items: List[Dict[str, Any]] = []
@@ -227,9 +175,10 @@ class Transcriber:
         try:
             segs, info = _do_transcribe(model)
             seg_items = _collect_segments(segs)
-        except Exception as gpu_err:
-            if self._is_gpu_error(gpu_err):
-                logger.warning("GPU 转写失败，回退到 CPU (%s)", gpu_err)
+        except RuntimeError as e:
+            # 仅 GPU 相关错误才回退 CPU，其他错误直接抛出
+            if self._is_gpu_error(e):
+                logger.warning("GPU 转写失败，回退到 CPU (%s)", e)
                 self._model = None
                 gc.collect()
                 model = self._get_model(force_cpu=True)
@@ -252,7 +201,6 @@ class Transcriber:
     # ---- 文本格式化 ----
 
     @staticmethod
-    @staticmethod
     def _format_transcript(segments) -> str:
         lines: List[str] = []
         for seg in segments:
@@ -269,196 +217,6 @@ class Transcriber:
         seg_path = folder / f"{safe_name}_segments.json"
         with open(seg_path, "w", encoding="utf-8") as f:
             json.dump(items, f, ensure_ascii=False)
-
-    # ---- pyannote 说话人分离 ----
-
-    def _transcribe_with_diarization(self, input_path: Path, output_folder: Path,
-                                     safe_name: str) -> Path:
-        """faster-whisper 转写 + pyannote 说话人分离"""
-        try:
-            from pyannote.audio import Pipeline
-        except ImportError:
-            raise ImportError(
-                "pyannote.audio 未安装。安装命令: pip install pyannote.audio"
-            )
-
-        hf_token: str = self.diar_config.get("hf_token") or os.environ.get("HF_TOKEN", "")
-        if not hf_token:
-            raise ValueError("HF_TOKEN 未配置，pyannote 说话人分离需要 HuggingFace Token")
-
-        with self._ensure_audio(input_path, output_folder, fmt="wav") as audio_path:
-            # 1. faster-whisper 转写（含词级时间戳）
-            model = self._get_model()
-            language: Optional[str] = self.whisper_config.get("language", "zh")
-            if language == "auto":
-                language = None
-
-            segments, info = model.transcribe(
-                str(audio_path), language=language
-            )
-
-            # 2. pyannote 说话人分离
-            import numpy as np
-            import scipy.io.wavfile as wavfile
-            import torch
-
-            sample_rate, audio_np = wavfile.read(str(audio_path))
-            if audio_np.dtype == np.int16:
-                audio_np = audio_np.astype(np.float32) / 32768.0
-            elif audio_np.dtype == np.int32:
-                audio_np = audio_np.astype(np.float32) / 2147483648.0
-            else:
-                audio_np = audio_np.astype(np.float32)
-
-            waveform = torch.from_numpy(audio_np).float()
-            if waveform.ndim == 1:
-                waveform = waveform.unsqueeze(0)
-            elif waveform.ndim == 2:
-                waveform = waveform.T
-
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                token=hf_token,
-            )
-            try:
-                if torch.cuda.is_available():
-                    pipeline = pipeline.to(torch.device("cuda"))
-            except Exception:
-                logger.warning("GPU 迁移失败，将使用 CPU 进行说话人分离（速度较慢）")
-
-            min_spk: int = self.diar_config.get("min_speakers", 2)
-            max_spk: int = self.diar_config.get("max_speakers", 5)
-            diarization = pipeline(
-                {"waveform": waveform, "sample_rate": sample_rate},
-                min_speakers=min_spk,
-                max_speakers=max_spk,
-            )
-
-            # 3. 词 → 说话人匹配
-            min_turn = self.diar_config.get("min_turn_duration", 0)
-            speaker_segments = self._assign_speakers(segments, diarization, min_turn=min_turn)
-            self._save_segments_json(output_folder, safe_name, speaker_segments)
-
-            # 4. 格式化输出
-            return self._format_diarized_output(
-                {"segments": speaker_segments}, output_folder, safe_name
-            )
-
-    @staticmethod
-    def _assign_speakers(segments, diarization, min_turn: float = 0.0) -> list:
-        speaker_turns = []
-        for turn, _, speaker in diarization.speaker_diarization.itertracks(yield_label=True):
-            speaker_turns.append((turn.start, turn.end, speaker))
-
-        raw_count = len(speaker_turns)
-        raw_switches = sum(1 for i in range(1, raw_count)
-                          if speaker_turns[i][2] != speaker_turns[i-1][2])
-        logger.debug("pyannote: %d raw turns, %d switches (%.0f%%)",
-                    raw_count, raw_switches,
-                    raw_switches / (raw_count - 1) * 100 if raw_count > 1 else 0)
-
-        if min_turn > 0:
-            speaker_turns = Transcriber._smooth_turns(speaker_turns, min_turn)
-            smooth_count = len(speaker_turns)
-            smooth_switches = sum(1 for i in range(1, smooth_count)
-                                 if speaker_turns[i][2] != speaker_turns[i-1][2])
-            logger.info("平滑后: %d turns → %d turns, 切换 %d → %d",
-                       raw_count, smooth_count, raw_switches, smooth_switches)
-
-        results = []
-        for seg in segments:
-            text = seg.text.strip()
-            if not text:
-                continue
-
-            speaker_overlap: dict = {}
-            for t_start, t_end, spk in speaker_turns:
-                overlap = max(0.0, min(seg.end, t_end) - max(seg.start, t_start))
-                if overlap > 0:
-                    speaker_overlap[spk] = speaker_overlap.get(spk, 0.0) + overlap
-
-            dominant = max(speaker_overlap, key=speaker_overlap.get) if speaker_overlap else "UNKNOWN"
-            results.append({
-                "speaker": dominant,
-                "start": seg.start,
-                "end": seg.end,
-                "text": text,
-            })
-
-        return results
-
-    @staticmethod
-    def _smooth_turns(turns: list, min_dur: float) -> list:
-        """合并过短且被同一说话人包围的 turn，消除模型交替噪声"""
-        if len(turns) < 3:
-            return turns
-        smoothed = [turns[0]]
-        for i in range(1, len(turns) - 1):
-            prev = smoothed[-1]
-            curr = turns[i]
-            nxt = turns[i + 1]
-            dur = curr[1] - curr[0]
-            if dur < min_dur and prev[2] == nxt[2] and prev[2] != curr[2]:
-                # 短 turn 且邻居相同 → 合并到前一个
-                smoothed[-1] = (prev[0], curr[1], prev[2])
-            else:
-                smoothed.append(curr)
-        smoothed.append(turns[-1])
-
-        # 平滑可能产生相邻同说话人 turn，需二次合并
-        merged = [smoothed[0]]
-        for turn in smoothed[1:]:
-            if turn[2] == merged[-1][2]:
-                merged[-1] = (merged[-1][0], turn[1], merged[-1][2])
-            else:
-                merged.append(turn)
-        return merged
-
-    def _format_diarized_output(self, result: Dict[str, Any], output_folder: Path,
-                                safe_name: str) -> Path:
-        transcript_path: Path = output_folder / f"{safe_name}.txt"
-
-        merged: List[Dict[str, Any]] = []
-        for seg in result.get("segments", []):
-            speaker: str = seg.get("speaker", "UNKNOWN")
-            text: str = seg.get("text", "").strip()
-            if not text:
-                continue
-            if merged and merged[-1]["speaker"] == speaker:
-                merged[-1]["end"] = seg.get("end", 0)
-                merged[-1]["text"] += " " + text
-            else:
-                merged.append({
-                    "speaker": speaker,
-                    "start": seg.get("start", 0),
-                    "end": seg.get("end", 0),
-                    "text": text,
-                })
-
-        lines: List[str] = [f"# {safe_name}", ""]
-        for block in merged:
-            header = (
-                f"## {block['speaker']} "
-                f"({self._format_time(block['start'])} - "
-                f"{self._format_time(block['end'])})"
-            )
-            lines.append(header)
-            lines.append("")
-            lines.append(block["text"])
-            lines.append("")
-
-        content: str = "\n".join(lines)
-        transcript_path.write_text(content, encoding="utf-8")
-        logger.info("已保存（含说话人标签）: %s", transcript_path.name)
-        set_state(output_folder, "transcribed")
-        return transcript_path
-
-    @staticmethod
-    def _format_time(seconds: float) -> str:
-        h: int = int(seconds // 3600)
-        m: int = int((seconds % 3600) // 60)
-        s: float = seconds % 60
-        return f"{h:02d}:{m:02d}:{s:06.3f}"
 
     # ---- 音频提取 ----
 

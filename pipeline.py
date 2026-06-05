@@ -74,12 +74,17 @@ class Pipeline:
 
         first_fmt: str = formats[0] if formats else "md"
         done_marker = folder / (f"{video_path.stem}.{first_fmt}" if self._skip_summary
-                                else f"{video_path.stem}-总结.{first_fmt}")
+                                else f"总结-{video_path.stem}.{first_fmt}")
         if done_marker.exists() and get_state(folder) == "done":
             logger.info("已完成，跳过")
             return
 
         transcript_raw: str = self._get_transcript(video_path, meta)
+
+        # 注入章节标题（YouTube/B站视频的章节标记）
+        chapters = meta.get("_chapters") or []
+        if chapters:
+            transcript_raw = self._inject_chapters(transcript_raw, folder / f"{video_path.stem}_segments.json", chapters)
 
         # 翻译（可选，在抛光之前）
         translated_raw: Optional[str] = None
@@ -93,13 +98,13 @@ class Pipeline:
         # 抛光
         logger.info("后处理（标点 + 分段）...")
         text_to_polish = translated_raw or transcript_raw
-        if "## SPEAKER_" not in text_to_polish:
-            segments_path = folder / f"{video_path.stem}_segments.json"
-            text_to_polish = self._add_timestamps(text_to_polish, segments_path)
+        segments_path = folder / f"{video_path.stem}_segments.json"
+        text_to_polish = self._add_timestamps(text_to_polish, segments_path)
         transcript_md: str
         try:
-            if "## SPEAKER_" in text_to_polish:
-                transcript_md = self._polish_diarized_transcript(text_to_polish)
+            multi_speaker: bool = self.config.get("summarizer", {}).get("multi_speaker", False)
+            if multi_speaker:
+                transcript_md = self._polish_multispeaker_transcript(text_to_polish)
             else:
                 transcript_md = self._polish_transcript(text_to_polish)
         except Exception as e:
@@ -114,7 +119,7 @@ class Pipeline:
             logger.info("总结中...")
             summary_text: str = self.summarizer.summarize(transcript_md, meta, style=style)
             set_state(folder, "done")
-            save_formats(summary_text, folder / f"{video_path.stem}-总结", formats, meta=meta)
+            save_formats(summary_text, folder / f"总结-{video_path.stem}", formats, meta=meta)
 
         # SRT 字幕（可选）
         if self._srt:
@@ -125,9 +130,9 @@ class Pipeline:
         stem = video_path.stem
         if "txt" not in formats:
             (folder / f"{stem}.txt").unlink(missing_ok=True)
-        (folder / ".pipeline_state").unlink(missing_ok=True)
         (folder / f"{stem}_segments.json").unlink(missing_ok=True)
         (folder / f"{stem}_subtitle.srt").unlink(missing_ok=True)
+        (folder / f"{stem}_subtitle.vtt").unlink(missing_ok=True)
         (folder / f"{stem}_subtitle_info.json").unlink(missing_ok=True)
         if translated_raw:
             zh_path = folder / f"{stem}_zh.txt"
@@ -194,6 +199,32 @@ class Pipeline:
             result.append(f"[{m:02d}:{s:02d}] {line}")
         return "\n".join(result)
 
+    @staticmethod
+    def _inject_chapters(text: str, segments_path: Path, chapters: list) -> str:
+        """将视频章节标题注入到转写文本中，按时间戳定位"""
+        if not chapters or not segments_path.exists():
+            return text
+        import json
+        segments = json.loads(segments_path.read_text(encoding="utf-8"))
+        lines = text.split("\n")
+
+        # 每个章节找最近的段落位置
+        injections = []  # [(line_index, title)]
+        seg_idx = 0
+        for ch in chapters:
+            ch_start = ch["start"]
+            # 找到第一个 start >= ch_start 的段落
+            while seg_idx < len(segments) and segments[seg_idx]["start"] < ch_start:
+                seg_idx += 1
+            if seg_idx < len(segments) and seg_idx < len(lines):
+                injections.append((seg_idx, ch["title"]))
+
+        # 从后往前插入（避免索引偏移）
+        for idx, title in reversed(injections):
+            lines.insert(idx, f"## {title}")
+
+        return "\n".join(lines)
+
     def _polish_chunk(self, text: str) -> str:
         try:
             return self.summarizer.polish(text)
@@ -201,71 +232,57 @@ class Pipeline:
             logger.warning("抛光失败，使用原文: %s", e)
             return text
 
-    def _polish_diarized_transcript(self, raw_text: str) -> str:
-        """对带说话人标签的转写逐段抛光，避免跨说话人合并段落"""
-        parts = raw_text.split('\n\n## SPEAKER_')
-        title = parts[0].strip()
+    def _polish_multispeaker_transcript(self, raw_text: str) -> str:
+        """用 LLM 为转写文本做说话人识别 + 标点分段（并行处理 + 重叠上下文）"""
+        max_input_chars: int = 5000
+        overlap: int = 300
 
-        if len(parts) < 2:
-            return self._polish_transcript(raw_text)
+        if len(raw_text) <= max_input_chars:
+            return self._polish_multispeaker_chunk(raw_text)
 
-        max_chars = 5000
-        result_parts = []
+        chunks = split_text_with_overlap(raw_text, max_input_chars, overlap, sep="\n")
+        polished: List[Optional[str]] = [None] * len(chunks)
 
-        for part in parts[1:]:
-            line_break = part.find('\n')
-            if line_break == -1:
-                continue
-            header = part[:line_break].strip()
-            body = part[line_break:].strip()
-
-            if len(body) < 20:
-                if body and body[-1] not in '。！？.!?、':
-                    body += '。'
-            elif len(body) <= max_chars:
+        max_workers = min(4, len(chunks))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._polish_multispeaker_chunk, chunk): i
+                for i, chunk in enumerate(chunks)
+            }
+            for future in as_completed(futures):
+                i = futures[future]
                 try:
-                    body = self._polish_chunk(body)
+                    polished[i] = future.result()
                 except Exception as e:
-                    logger.warning("说话人 SPEAKER_%s 抛光失败: %s", header, e)
+                    logger.warning("多说话人抛光分段 %d 失败，使用原文: %s", i + 1, e)
+                    polished[i] = chunks[i]
+
+        # 合并：每块开头包含上一块的末尾作为上下文（重叠区域），需去除
+        result: str = polished[0] or ""
+        for i in range(1, len(polished)):
+            chunk = polished[i] or ""
+            parts = chunk.split("\n\n", 1)
+            if len(parts) > 1:
+                result += "\n\n" + parts[1]
+            elif "\n" in chunk:
+                lines = chunk.split("\n", 1)
+                result += "\n\n" + lines[1].lstrip() if len(lines) > 1 else ""
             else:
-                try:
-                    body = self._polish_transcript(body)
-                except Exception as e:
-                    logger.warning("说话人 SPEAKER_%s 长文本抛光失败: %s", header, e)
+                result += "\n\n" + chunk
 
-            result_parts.append(f"## SPEAKER_{header}\n\n{body}")
+        return result
 
-        return f"{title}\n\n" + "\n\n".join(result_parts)
+    def _polish_multispeaker_chunk(self, text: str) -> str:
+        try:
+            return self.summarizer.polish_multispeaker(text)
+        except Exception as e:
+            logger.warning("多说话人抛光失败，使用原文: %s", e)
+            return text
 
     def _translate_transcript(self, raw_text: str) -> str:
         """逐行翻译转写文本，保持行结构以对齐 SRT 时间戳"""
-        if "## SPEAKER_" in raw_text:
-            return self._translate_diarized(raw_text)
         translator = self._get_translator()
         return translator.translate(raw_text)
-
-    def _translate_diarized(self, raw_text: str) -> str:
-        """翻译 diarized 文本：保留 speaker 头不变，只翻译正文段落"""
-        parts = raw_text.split('\n\n## SPEAKER_')
-        title = parts[0].strip()
-
-        if len(parts) < 2:
-            return self._get_translator().translate(raw_text)
-
-        translator = self._get_translator()
-        result_parts = []
-
-        for part in parts[1:]:
-            line_break = part.find('\n')
-            if line_break == -1:
-                continue
-            header = part[:line_break].strip()
-            body = part[line_break:].strip()
-            if body:
-                body = translator.translate(body)
-            result_parts.append(f"## SPEAKER_{header}\n\n{body}")
-
-        return f"{title}\n\n" + "\n\n".join(result_parts)
 
     def _generate_srt(self, folder: Path, stem: str, text: str) -> None:
         """从段落时间戳和文本生成 SRT 字幕文件"""
@@ -276,17 +293,10 @@ class Pipeline:
             logger.warning("无段落时间戳数据，跳过字幕生成")
             return
 
-        # 说话人分离输出会合并同说话人段落，文本行数 < segments JSON 条目数，
-        # 直接从 JSON 提取文本确保与时间戳一一对齐
-        if "## SPEAKER_" in text:
-            import json
-            segments = json.loads(segments_path.read_text(encoding="utf-8"))
-            plain_lines = [seg.get("text", "").strip() for seg in segments]
-        else:
-            plain_lines = [
-                line.strip() for line in text.split("\n")
-                if line.strip() and not line.startswith("#")
-            ]
+        plain_lines = [
+            line.strip() for line in text.split("\n")
+            if line.strip() and not line.startswith("#")
+        ]
 
         generate_srt(segments_path, plain_lines, folder / f"{stem}.srt")
 
@@ -294,14 +304,18 @@ class Pipeline:
         """获取转写文本：优先使用视频平台字幕，不可用则回退 Whisper"""
         folder = video_path.parent
         stem = video_path.stem
+        # 支持 .srt 和 .vtt 两种字幕格式
         sub_path = folder / f"{stem}_subtitle.srt"
+        if not sub_path.exists():
+            sub_path = folder / f"{stem}_subtitle.vtt"
 
         if sub_path.exists():
             result = self._try_use_subtitles(sub_path, folder, stem, meta)
             if result is not None:
                 return result
-            # 字幕不达标，清理并回退
-            sub_path.unlink(missing_ok=True)
+            # 字幕不达标，清理并回退（两种格式都清理）
+            (folder / f"{stem}_subtitle.srt").unlink(missing_ok=True)
+            (folder / f"{stem}_subtitle.vtt").unlink(missing_ok=True)
             (folder / f"{stem}_subtitle_info.json").unlink(missing_ok=True)
 
         # 回退 Whisper 转写
@@ -332,7 +346,12 @@ class Pipeline:
 
         duration = meta.get("duration", 0)
         expected_lang = self.config.get("whisper", {}).get("language", "auto")
-        quality = assess_quality(segments, duration, sub_info["source"], expected_lang)
+        auto_cfg = sub_config.get("auto_subtitle", {})
+        quality = assess_quality(
+            segments, duration, sub_info["source"], expected_lang,
+            min_coverage=auto_cfg.get("min_coverage", 0.50),
+            max_noise_ratio=auto_cfg.get("max_noise_ratio", 0.10),
+        )
 
         if not quality.is_acceptable:
             logger.info("字幕质量不达标（%s），回退 Whisper", ", ".join(quality.details[1:]))
@@ -417,7 +436,7 @@ class Pipeline:
             for file in sorted(subdir.iterdir()):
                 if not file.is_file() or file.suffix not in exts:
                     continue
-                if file.stem.endswith("-总结"):
+                if file.stem.startswith("总结-"):
                     shutil.copy2(file, summary_dir / file.name)
                     count_s += 1
                 else:

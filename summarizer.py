@@ -12,6 +12,53 @@ from utils import load_env, split_text
 
 logger = logging.getLogger(__name__)
 
+# ── API 服务商预设 ──
+# 选一个 provider 即可，base_url 和 model 会自动填充
+API_PROVIDERS = {
+    "deepseek": {
+        "name": "DeepSeek",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4-pro",
+        "polish_model": "deepseek-v4-flash",
+        "description": "推荐，国内直连，10 元用很久",
+    },
+    "zhipu": {
+        "name": "智谱 GLM",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-4-flash",
+        "polish_model": "glm-4-flash",
+        "description": "有免费额度",
+    },
+    "tongyi": {
+        "name": "通义千问",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-plus",
+        "polish_model": "qwen-turbo",
+        "description": "有免费额度",
+    },
+    "moonshot": {
+        "name": "月之暗面",
+        "base_url": "https://api.moonshot.cn/v1",
+        "model": "moonshot-v1-8k",
+        "polish_model": "moonshot-v1-8k",
+        "description": "",
+    },
+    "ollama": {
+        "name": "Ollama（本地）",
+        "base_url": "http://localhost:11434/v1",
+        "model": "qwen2.5:7b",
+        "polish_model": "",
+        "description": "需先本地安装 Ollama",
+    },
+    "mimo": {
+        "name": "小米 MiMo",
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "model": "mimo-v2-pro",
+        "polish_model": "mimo-v2-flash",
+        "description": "1M 上下文，性价比高",
+    },
+}
+
 # 可重试的 OpenAI 异常类型
 try:
     import openai as _openai
@@ -23,6 +70,9 @@ try:
     )
 except (ImportError, AttributeError):
     _RETRYABLE_ERRORS = ()
+    import logging
+    _logger = logging.getLogger(__name__)
+    _logger.warning("无法导入 OpenAI 可重试异常类型，API 调用将不会自动重试")
 
 
 class OpenAICompatSummarizer:
@@ -92,14 +142,27 @@ class OpenAICompatSummarizer:
         import os
 
         self.config: Dict[str, Any] = config.get("summarizer", {})
-        self.model: str = self.config.get("model", "deepseek-chat")
         self.max_chunk: int = int(self.config.get("max_chunk_chars", 80000))
         self.max_tokens: int = int(self.config.get("max_tokens", 4096))
-        self.polish_model: str = self.config.get("polish_model", "")
         self._timeout: float = float(self.config.get("timeout", 300))
         self._max_retries: int = int(self.config.get("max_retries", 3))
 
-        base_url: str = self.config.get("base_url", "https://api.deepseek.com")
+        # 解析 API 提供商：支持预设名称（deepseek / zhipu / tongyi / moonshot / ollama）
+        # 也兼容旧格式（openai / ollama 写在 provider 字段）
+        provider_key: str = self.config.get("api_provider", "") or self.config.get("provider", "")
+        preset = API_PROVIDERS.get(provider_key, None)
+
+        if preset:
+            # 使用预设：自动填充 base_url 和 model
+            base_url: str = self.config.get("base_url") or preset["base_url"]
+            self.model: str = self.config.get("model") or preset["model"]
+            self.polish_model: str = self.config.get("polish_model") or preset["polish_model"]
+        else:
+            # 自定义模式：用户手动填写 base_url 和 model
+            base_url: str = self.config.get("base_url", "https://api.deepseek.com")
+            self.model: str = self.config.get("model", "deepseek-v4-pro")
+            self.polish_model: str = self.config.get("polish_model", "")
+
         api_key: str = os.environ.get("API_KEY", "")
         if not api_key:
             raise ValueError("API_KEY 未设置，请在 .env 文件中配置 API_KEY")
@@ -107,7 +170,14 @@ class OpenAICompatSummarizer:
         self.client: OpenAI = OpenAI(api_key=api_key, base_url=base_url, timeout=self._timeout)
 
     def summarize(self, text: str, meta: Dict[str, Any], style: str = "auto") -> str:
-        prompt_instruction = self.STYLE_PROMPTS.get(style, self.STYLE_PROMPTS["auto"])
+        # 自定义提示词优先
+        if style == "custom":
+            prompt_instruction = self.config.get("custom_prompt", "")
+            if not prompt_instruction:
+                logger.warning("未配置 custom_prompt，回退到 auto 风格")
+                prompt_instruction = self.STYLE_PROMPTS["auto"]
+        else:
+            prompt_instruction = self.STYLE_PROMPTS.get(style, self.STYLE_PROMPTS["auto"])
 
         if len(text) <= self.max_chunk:
             return self._summarize_chunk(text, meta, prompt_instruction)
@@ -225,18 +295,55 @@ class OpenAICompatSummarizer:
         )
         return content or text
 
+    def polish_multispeaker(self, text: str) -> str:
+        """为转写文本做说话人识别 + 添加标点 + 分段，使用 polish_model"""
+        model = self.polish_model or self.model
+        prompt = (
+            "你是一个中文语音转写文本格式化助手。请对以下语音转写文本做三件事：\n"
+            "1. 根据对话内容和时间间隔识别不同的说话人，在说话人切换时标注前缀\n"
+            "2. 添加合适的标点符号（逗号、句号、问号等）\n"
+            "3. 按语义将文本拆分为合适的段落（用空行分隔）\n\n"
+            "提示：每行开头的 [MM:SS] 是该片段的起始时间。"
+            "时间间隔较大（如 >5 秒）通常意味着说话人转换或话题切换。"
+            "连续密集的片段通常属于同一说话人、同一段落。\n\n"
+            "识别说话人的线索（按优先级）：\n"
+            "- 内容中的问答关系（问句后紧跟的回答通常来自不同人）\n"
+            "- 观点的交替和转折（\"但是\"、\"不过\"、\"我觉得\"、\"不对\"等转折词暗示切换）\n"
+            "- 时间间隔变化（长时间间隔通常暗示说话人转换）\n"
+            "- 语义的边界（话题切换时通常涉及不同说话人）\n\n"
+            "规则：\n"
+            "- 说话人标签格式为「说话人A：」「说话人B：」，以此类推\n"
+            "- 每个新段落开头标注说话人，段落内同一人连续话语不重复标注\n"
+            "- 如果全文明显只有一个人说话（无问答、无观点交替、时间间隔均匀），则不添加说话人标签\n"
+            "- 只添加标点、段落分隔和说话人标注，不要修改任何文字内容\n"
+            "- 不要增删改任何词语，保持原文字不变\n"
+            "- 输出时去掉行首的 [MM:SS] 时间标记\n"
+            "- 每段内容连续书写，不要在段落内部额外换行\n"
+            "- 每段5-12句话为宜，段落间用空行分隔\n\n"
+            "直接输出格式化后的文本，不要任何解释。\n\n"
+            f"以下是转写文本：\n\n{text}"
+        )
+        content = self._call_api(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=16384,
+            timeout=120,
+            model=model,
+        )
+        return content or text
+
 
 def create_summarizer(config: Dict[str, Any]) -> OpenAICompatSummarizer:
-    """工厂函数：根据配置创建总结器"""
+    """工厂函数：根据配置创建总结器。支持预设名称 (deepseek/zhipu/tongyi/moonshot/ollama) 和自定义。"""
     load_env()
 
-    provider: str = config.get("summarizer", {}).get("provider", "openai")
+    cfg = config.setdefault("summarizer", {})
 
-    if provider == "ollama":
-        cfg = config.setdefault("summarizer", {})
-        cfg.setdefault("base_url", "http://localhost:11434/v1")
+    # 兼容旧配置：将 provider 字段迁移为 api_provider
+    old_provider = cfg.get("provider", "")
+    if old_provider and not cfg.get("api_provider"):
+        if old_provider == "ollama":
+            cfg["api_provider"] = "ollama"
+        else:
+            cfg["api_provider"] = "deepseek"  # 旧版 openai 默认即 DeepSeek
 
-    if provider in ("openai", "ollama"):
-        return OpenAICompatSummarizer(config)
-
-    raise ValueError(f"未知的总结器: {provider}")
+    return OpenAICompatSummarizer(config)
