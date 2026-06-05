@@ -92,32 +92,32 @@ def init_cuda() -> None:
     # 扫描 site-packages 中的 nvidia/ 和 ctranslate2/ DLL 目录
     for _d in sys.path:
         for _pkg in ("nvidia", "ctranslate2"):
-            _pkg_dir = os.path.join(_d, _pkg)
-            if os.path.isdir(_pkg_dir):
+            _pkg_dir = Path(_d) / _pkg
+            if _pkg_dir.is_dir():
                 # 子目录的 bin/（nvidia/cublas/bin, nvidia/cuda_runtime/bin 等）
-                for _sub in os.listdir(_pkg_dir):
-                    _bin = os.path.join(_pkg_dir, _sub, "bin")
-                    if os.path.isdir(_bin):
+                for _sub in _pkg_dir.iterdir():
+                    _bin = _sub / "bin"
+                    if _bin.is_dir():
                         try:
-                            os.add_dll_directory(_bin)
+                            os.add_dll_directory(str(_bin))
                         except Exception:
                             pass
                 # 包目录本身可能直接包含 DLL（如 ctranslate2/cudnn64_9.dll）
-                if any(f.endswith(".dll") for f in os.listdir(_pkg_dir)):
+                if any(f.suffix == ".dll" for f in _pkg_dir.iterdir()):
                     try:
-                        os.add_dll_directory(_pkg_dir)
+                        os.add_dll_directory(str(_pkg_dir))
                     except Exception:
                         pass
 
     # 扫描 CUDA Toolkit 安装目录
-    for cuda_root in [r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA",
-                      os.environ.get("CUDA_PATH", "")]:
-        if cuda_root and os.path.isdir(cuda_root):
-            for ver_dir in sorted(os.listdir(cuda_root), reverse=True):
-                bin_dir = os.path.join(cuda_root, ver_dir, "bin")
-                if os.path.isdir(bin_dir):
+    for cuda_root in [Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"),
+                      Path(os.environ.get("CUDA_PATH", ""))]:
+        if str(cuda_root) and cuda_root.is_dir():
+            for ver_dir in sorted(cuda_root.iterdir(), reverse=True):
+                bin_dir = ver_dir / "bin"
+                if bin_dir.is_dir():
                     try:
-                        os.add_dll_directory(bin_dir)
+                        os.add_dll_directory(str(bin_dir))
                     except Exception:
                         pass
                     break

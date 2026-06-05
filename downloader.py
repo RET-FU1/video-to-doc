@@ -88,7 +88,7 @@ class Downloader:
         if no_playlist:
             opts["noplaylist"] = True
         cookies: str = self.dl_config.get("cookies_file", "")
-        if cookies and os.path.exists(cookies):
+        if cookies and Path(cookies).exists():
             opts["cookiefile"] = cookies
         proxy: str = self.dl_config.get("proxy", "")
         if proxy:
@@ -236,7 +236,7 @@ class Downloader:
             "--add-header", "Accept-Language:zh-CN,zh;q=0.9,en;q=0.5",
         ]
         cookies: str = self.dl_config.get("cookies_file", "")
-        if cookies and os.path.exists(cookies):
+        if cookies and Path(cookies).exists():
             base_args.extend(["--cookies", cookies])
         for attempt in range(1, 4):
             try:
@@ -309,7 +309,7 @@ class Downloader:
                 },
             }
             cookies: str = self.dl_config.get("cookies_file", "")
-            if cookies and os.path.exists(cookies):
+            if cookies and Path(cookies).exists():
                 opts["cookiefile"] = cookies
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -373,7 +373,7 @@ class Downloader:
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5",
             },
         }
-        if cookies and os.path.exists(cookies):
+        if cookies and Path(cookies).exists():
             dl_opts["cookiefile"] = cookies
         if is_manual:
             dl_opts["writesubtitles"] = True
