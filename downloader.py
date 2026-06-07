@@ -188,8 +188,14 @@ class Downloader:
                 continue
 
         if not entries:
-            logger.info("使用 yt-dlp 原生播放列表支持...")
-            return self._download_playlist_direct(url, playlist_title)
+            # flat-playlist 无结果 → 可能是 B站分P / YouTube 系列等，尝试原生下载
+            logger.info("未检测到独立播放列表条目，尝试 yt-dlp 原生多集下载...")
+            try:
+                return self._download_playlist_direct(url, playlist_title)
+            except Exception as e:
+                logger.warning("原生多集下载失败: %s，回退为单视频下载", e)
+                video_path, video_meta = self.download(url, output_subdir=playlist_title)
+                return [(video_path, video_meta)]
 
         logger.info("共 %d 个视频", len(entries))
         results: List[Tuple[Path, Dict[str, Any]]] = []
