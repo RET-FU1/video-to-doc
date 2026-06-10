@@ -90,6 +90,10 @@ class Downloader:
         cookies: str = self.dl_config.get("cookies_file", "")
         if cookies and Path(cookies).exists():
             opts["cookiefile"] = cookies
+        # 直接从浏览器读取 Cookie（无需手动导出文件）
+        browser: str = self.dl_config.get("cookies_from_browser", "").strip()
+        if browser:
+            opts["cookiesfrombrowser"] = (browser,)
         proxy: str = self.dl_config.get("proxy", "")
         if proxy:
             opts["proxy"] = proxy
@@ -244,6 +248,9 @@ class Downloader:
         cookies: str = self.dl_config.get("cookies_file", "")
         if cookies and Path(cookies).exists():
             base_args.extend(["--cookies", cookies])
+        browser: str = self.dl_config.get("cookies_from_browser", "").strip()
+        if browser:
+            base_args.extend(["--cookies-from-browser", browser])
         for attempt in range(1, 4):
             try:
                 result: subprocess.CompletedProcess = subprocess.run(
