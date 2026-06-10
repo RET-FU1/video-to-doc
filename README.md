@@ -4,9 +4,8 @@
 
 ## 功能
 
-- **图形界面** — 双击启动，粘贴链接即可，支持实时彩色日志、随时停止
+- **图形界面** — `python gui.py` 启动，粘贴链接即可，支持实时彩色日志、随时停止
 - **自动环境** — 自动使用项目虚拟环境，无需手动激活
-- **字幕优先** — 优先提取视频平台字幕（YouTube/B站），质量达标则跳过 Whisper 转写，大幅节省时间
 - **语音转文字** — 基于 faster-whisper，本地 GPU 加速（CTranslate2），VAD 自动跳过静音提速，支持热词增强和初始提示词
 - **字幕优先** — 优先提取视频平台字幕（YouTube/B站），质量达标则跳过 Whisper 转写，大幅节省时间
 - **章节提取** — 自动提取视频章节标记（YouTube/B站），注入转写文档作为分段标题
@@ -14,9 +13,9 @@
 - **多说话人识别** — 抛光时由 LLM 根据对话上下文自动识别不同说话人并标注，无需额外依赖
 - **翻译** — 外文视频翻译为目标语言，生成汉化文档
 - **字幕生成** — 生成 SRT 字幕文件，可配合翻译生成目标语言字幕
-- **AI 总结** — 兼容 OpenAI 接口（支持 DeepSeek、MiMo、智谱、通义千问、月之暗面、Ollama），6 种总结风格（含自定义提示词，GUI 可直接输入），忠于原文不编造
+- **AI 总结** — 兼容 OpenAI 接口（支持 DeepSeek、MiMo、智谱、通义千问、月之暗面、Ollama），6 种总结风格可同时多选（含自定义提示词），忠于原文不编造
 - **多格式输出** — 转写和总结可按需输出 `.md` `.txt` `.html`，HTML 支持暗色模式、TOC 导航
-- **播放列表** — 支持 B站合集、YouTube 播放列表等批量处理
+- **播放列表** — 支持 B站合集/分P、YouTube 播放列表等批量处理
 - **断点续跑** — 中断后重新运行自动跳过已完成步骤
 - **环境诊断** — `python main.py --check` 一键检查 ffmpeg、模型、API、GPU
 - **跨平台** — Windows / Mac / Linux
@@ -108,8 +107,8 @@ python main.py "https://www.youtube.com/playlist?list=xxx" --playlist
 # 多说话人识别
 python main.py "https://example.com/video" --multi-speaker
 
-# 指定总结风格
-python main.py "https://example.com/video" --summary-style expert
+# 指定总结风格（可多选）
+python main.py "https://example.com/video" --summary-styles auto,expert,knowledge_points
 
 # 翻译 + 生成字幕
 python main.py "https://example.com/video" --translate --srt
@@ -130,7 +129,8 @@ output/
     ├── {标题}.md          # 转写文档（已加标点分段）
     ├── {标题}.html        # 转写文档（仅选中 html 时）
     ├── {标题}.srt         # SRT 字幕（启用字幕时）
-    └── 总结-{标题}.md      # AI 总结
+    ├── 全面总结-总结-{标题}.md # AI 总结（风格名作为前缀）
+    └── 专家深度-总结-{标题}.md
 ```
 
 中间文件（`.txt`、`_segments.json`、`_subtitle.srt`、`_subtitle.vtt`、`_subtitle_info.json`、`_zh.txt`）在任务完成后自动清理。
@@ -142,7 +142,7 @@ output/
 └── {合集或文件夹名}/
     ├── {视频1标题}/
     │   ├── {视频1标题}.md
-    │   └── 总结-{视频1标题}.md
+    │   └── 全面总结-总结-{视频1标题}.md
     ├── {视频2标题}/
     │   └── ...
     ├── 转写汇总/          # 所有视频的转写文件集中于此
@@ -151,8 +151,10 @@ output/
 
 ## 总结风格
 
-| 风格 | CLI 参数 | 说明 |
-|------|---------|------|
+一共 6 种风格，可以**同时多选**，每种风格生成一个独立的总结文件。
+
+| 风格 | 参数 | 说明 |
+|------|------|------|
 | 全面总结 | `auto` | 精炼文章式：核心观点 → 论证展开 → 关键收获（默认） |
 | 知识点提取 | `knowledge_points` | 结构化列出全部知识点，含概念解释、重要性说明、原文例子 |
 | 操作步骤 | `steps` | 按顺序拆解步骤：做什么、为什么必要、怎么做、常见坑点 |
@@ -160,7 +162,7 @@ output/
 | 专家深度 | `expert` | 世界级专家视角，自我核查事实，锐利批判思维 |
 | 自定义 | `custom` | 在 `config.yaml` 的 `custom_prompt` 中编写自己的提示词 |
 
-在 GUI 中选择"自定义"时会显示提示词输入框，可直接在界面中编写。
+在 GUI 中勾选"自定义"时会显示提示词输入框，可直接在界面中编写。
 
 ## 支持的格式
 
@@ -192,7 +194,7 @@ output/
 | `summarizer.max_tokens` | 单次回复最大 token | `4096` |
 | `summarizer.timeout` | API 超时（秒） | `300` |
 | `summarizer.max_retries` | API 失败重试次数 | `3` |
-| `summarizer.summary_style` | 默认总结风格 | `auto` |
+| `summarizer.summary_styles` | 总结风格列表（可多选） | `[auto]` |
 | `summarizer.custom_prompt` | 自定义总结提示词 | 空 |
 | `summarizer.multi_speaker` | 多说话人识别 | `false` |
 | `summarizer.output_formats` | 输出格式 | `[md]` |
@@ -204,7 +206,8 @@ output/
 | `subtitles.auto_subtitle.max_noise_ratio` | 自动字幕最大噪音占比 | `0.10` |
 | `downloader.quality` | 视频清晰度预设 | `best` |
 | `downloader.format` | 高级自定义 yt-dlp 格式串（留空用 quality） | 空 |
-| `downloader.cookies_file` | Cookie 文件路径 | 空 |
+| `downloader.cookies_file` | Cookie 文件路径（B站需登录） | 空 |
+| `downloader.cookies_from_browser` | 直接从浏览器读取 Cookie：chrome/firefox/edge | 空 |
 | `downloader.proxy` | 代理地址 | 空 |
 | `downloader.timeout` | 下载超时（秒） | `7200` |
 
@@ -242,11 +245,10 @@ A: 自动回退到 CPU。运行 `python main.py --check` 诊断。确保 NVIDIA 
 **Q: 下载失败？**
 A: 更新 yt-dlp：`venv/Scripts/pip install -U yt-dlp`
 
-**Q: B站视频下载失败？**
-A: 在 `config.yaml` 中设置 `downloader.cookies_file` 指向浏览器导出的 cookies.txt
-
-**Q: B站字幕没有生效？**
-A: B站字幕需要登录后才可用。导出浏览器 cookies 并配置 `downloader.cookies_file`，程序会提示具体原因。
+**Q: B站视频下载失败（412 错误）？**
+A: B站 现在要求登录才能下载。两种方式：
+1. 安装 [Get cookies.txt](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) 浏览器扩展 → 登录 B站 → 导出 cookies.txt → 配置 `downloader.cookies_file: "cookies.txt"`
+2. 设置 `downloader.cookies_from_browser: edge`（需先关掉 Chrome，Edge 下有时需 cookies.txt 兜底）
 
 **Q: 转写文本标点不准？**
 A: 标点由 LLM 自动添加。可在 `config.yaml` 中设置 `summarizer.polish_model` 切换模型。

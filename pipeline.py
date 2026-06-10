@@ -69,12 +69,18 @@ class Pipeline:
     def _process_one(self, video_path: Path, meta: Dict[str, Any]) -> None:
         """单个视频/音频的转写→[翻译]→抛光→总结→[字幕]"""
         formats: List[str] = self.config.get("summarizer", {}).get("output_formats", ["md"])
-        style: str = self.config.get("summarizer", {}).get("summary_style", "auto")
         folder: Path = video_path.parent
 
+        # 向后兼容：支持旧的 summary_style (字符串) 和新的 summary_styles (列表)
+        style_cfg = self.config.get("summarizer", {})
+        style_val = style_cfg.get("summary_styles") or style_cfg.get("summary_style", "auto")
+        styles: List[str] = style_val if isinstance(style_val, list) else [style_val]
+
         first_fmt: str = formats[0] if formats else "md"
+        _style_cn = {"auto": "全面总结", "knowledge_points": "知识点", "steps": "操作步骤",
+                     "core_ideas": "核心观点", "expert": "专家深度", "custom": "自定义"}
         done_marker = folder / (f"{video_path.stem}.{first_fmt}" if self._skip_summary
-                                else f"总结-{video_path.stem}.{first_fmt}")
+                                else f"{_style_cn.get(styles[0], styles[0])}-总结-{video_path.stem}.{first_fmt}")
         if done_marker.exists() and get_state(folder) == "done":
             logger.info("已完成，跳过")
             return
@@ -116,10 +122,17 @@ class Pipeline:
             logger.info("跳过总结")
             set_state(folder, "done")
         else:
-            logger.info("总结中...")
-            summary_text: str = self.summarizer.summarize(transcript_md, meta, style=style)
+            logger.info("总结中（%d 种风格）...", len(styles))
+            _style_names = {
+                "auto": "全面总结", "knowledge_points": "知识点", "steps": "操作步骤",
+                "core_ideas": "核心观点", "expert": "专家深度", "custom": "自定义",
+            }
+            for style in styles:
+                logger.info("  风格: %s", style)
+                summary_text: str = self.summarizer.summarize(transcript_md, meta, style=style)
+                style_cn = _style_names.get(style, style)
+                save_formats(summary_text, folder / f"{style_cn}-总结-{video_path.stem}", formats, meta=meta)
             set_state(folder, "done")
-            save_formats(summary_text, folder / f"总结-{video_path.stem}", formats, meta=meta)
 
         # SRT 字幕（可选）
         if self._srt:
@@ -436,7 +449,7 @@ class Pipeline:
             for file in sorted(subdir.iterdir()):
                 if not file.is_file() or file.suffix not in exts:
                     continue
-                if file.stem.startswith("总结-"):
+                if "-总结" in file.stem or file.stem.startswith("总结-"):
                     shutil.copy2(file, summary_dir / file.name)
                     count_s += 1
                 else:

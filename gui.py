@@ -171,29 +171,21 @@ class App:
             tk.Label(row2, text="总结风格：", font=F["body"],
                      fg=C["text"], bg=C["card"]).pack(side="left")
 
-            self.style_labels = ["全面总结", "知识点提取", "操作步骤", "核心观点", "专家深度", "自定义"]
-            self.style_map = {
-                "全面总结": "auto",
-                "知识点提取": "knowledge_points",
-                "操作步骤": "steps",
-                "核心观点": "core_ideas",
-                "专家深度": "expert",
-                "自定义": "custom",
-            }
+            self.style_checkboxes = {}
+            self.style_row2 = tk.Frame(card, bg=C["card"])
+            self.style_row2.pack(fill="x", pady=(4, 0))
+            for label, key in [("全面总结", "auto"), ("知识点", "knowledge_points"),
+                               ("操作步骤", "steps"), ("核心观点", "core_ideas"),
+                               ("专家深度", "expert"), ("自定义", "custom")]:
+                var = tk.BooleanVar(value=(key == "auto"))
+                cb = tk.Checkbutton(self.style_row2, text=label, variable=var,
+                                    font=F["body"], bg=C["card"],
+                                    activebackground=C["card"], selectcolor=C["card"],
+                                    command=self._on_style_change)
+                cb.pack(side="left", padx=(6, 0))
+                self.style_checkboxes[key] = (var, cb)
 
-            self.style_var = tk.StringVar(value="全面总结")
-            self.style_combo = ttk.Combobox(row2, textvariable=self.style_var,
-                         values=self.style_labels,
-                         state="readonly", width=14,
-                         font=F["body"])
-            self.style_combo.pack(side="left", padx=(6, 0))
-            self.style_combo.bind("<<ComboboxSelected>>", self._on_style_change)
-
-            self.style_desc = tk.Label(row2, text="— 精炼文章式：核心观点 → 论证展开 → 关键收获",
-                                       font=F["small"], fg=C["muted"], bg=C["card"])
-            self.style_desc.pack(side="left", padx=(6, 0))
-
-            # 自定义提示词输入框（选择"自定义"时显示）
+            # 自定义提示词输入框（勾选"自定义"时显示）
             self.custom_prompt_frame = tk.Frame(card, bg=C["card"])
             tk.Label(self.custom_prompt_frame, text="自定义提示词：", font=F["body"],
                      fg=C["text"], bg=C["card"]).pack(anchor="w")
@@ -347,7 +339,8 @@ class App:
         for w in (self.folder_cb, self.multi_speaker_cb,
                   self.translate_cb, self.srt_cb, self.nosummary_cb):
             w.configure(state=state)
-        self.style_combo.configure(state=readonly)
+        for _, cb in self.style_checkboxes.values():
+            cb.configure(state=state)
         for cb in self.fmt_cbs:
             cb.configure(state=state)
 
@@ -358,17 +351,9 @@ class App:
             self.output_dir_var.set(path)
 
     def _on_style_change(self, event=None):
-        descs = {
-            "全面总结": "— 精炼文章式：核心观点 → 论证展开 → 关键收获",
-            "知识点提取": "— 结构化知识点：概念解释 + 为何重要 + 原文例子",
-            "操作步骤": "— 步骤拆解：做什么 + 为什么必要 + 怎么做 + 坑点",
-            "核心观点": "— 洞察提炼：拒绝话题罗列，每条都是「原来如此」",
-            "专家深度": "— 世界级专家视角，自我核查事实，锐利批判思维",
-            "自定义": "— 在下方输入框中编写你自己的总结提示词",
-        }
-        label = self.style_var.get()
-        self.style_desc.configure(text=descs.get(label, ""))
-        if label == "自定义":
+        # 勾选"自定义"时显示提示词输入框
+        var, _ = self.style_checkboxes.get("custom", (None, None))
+        if var and var.get():
             self.custom_prompt_frame.pack(fill="x", pady=(8, 0), before=self._row3)
         else:
             self.custom_prompt_frame.pack_forget()
@@ -443,15 +428,18 @@ class App:
         if self.fmt_txt.get():  formats.append("txt")
         if self.fmt_html.get(): formats.append("html")
 
-        style_eng = self.style_map.get(self.style_var.get(), "auto")
+        # 收集勾选的总结风格
+        selected_styles = [key for key, (var, _) in self.style_checkboxes.items() if var.get()]
+        if not selected_styles:
+            selected_styles = ["auto"]  # 至少选一个
 
         with open(PROJECT_ROOT / "config.yaml", "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
         load_env()
 
         summarizer_cfg = config.setdefault("summarizer", {})
-        summarizer_cfg["summary_style"] = style_eng
-        if style_eng == "custom":
+        summarizer_cfg["summary_styles"] = selected_styles
+        if "custom" in selected_styles:
             custom_prompt = self.custom_prompt_text.get("1.0", "end-1c").strip()
             if custom_prompt:
                 summarizer_cfg["custom_prompt"] = custom_prompt

@@ -207,9 +207,8 @@ def main() -> None:
     parser.add_argument("--folder", default=None, help="批量处理文件夹内所有视频")
     parser.add_argument("--skip-download", action="store_true", help="跳过下载（已有视频文件）")
     parser.add_argument("--download-only", action="store_true", help="仅下载视频，不做转写和总结")
-    parser.add_argument("--summary-style", default="auto",
-                        choices=["auto", "knowledge_points", "steps", "core_ideas", "expert", "custom"],
-                        help="总结风格 (默认: auto，custom 需在 config.yaml 中设置 custom_prompt)")
+    parser.add_argument("--summary-styles", default="auto",
+                        help="总结风格，逗号分隔: auto,knowledge_points,steps,core_ideas,expert,custom (默认: auto)")
     parser.add_argument("--output-formats", default="md",
                         help="输出格式，逗号分隔: md,txt,html (默认: md)")
     parser.add_argument("--multi-speaker", action="store_true",
@@ -238,7 +237,7 @@ def main() -> None:
         sys.exit(1)
 
     summarizer_cfg = config.setdefault("summarizer", {})
-    summarizer_cfg["summary_style"] = args.summary_style
+    summarizer_cfg["summary_styles"] = [s.strip() for s in args.summary_styles.split(",") if s.strip()]
     summarizer_cfg["output_formats"] = [
         f.strip() for f in args.output_formats.split(",") if f.strip()
     ]

@@ -32,7 +32,13 @@ summarizer:
   output_formats:
   - md
   polish_model: ''
-  summary_style: auto
+  summary_styles:
+  - auto
+  # - knowledge_points
+  # - steps
+  # - core_ideas
+  # - expert
+  # - custom
 translation:
   target_lang: zh
 whisper:
