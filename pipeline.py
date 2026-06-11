@@ -80,7 +80,7 @@ class Pipeline:
         _style_cn = {"auto": "全面总结", "knowledge_points": "知识点", "steps": "操作步骤",
                      "core_ideas": "核心观点", "expert": "专家深度", "custom": "自定义"}
         done_marker = folder / (f"{video_path.stem}.{first_fmt}" if self._skip_summary
-                                else f"{_style_cn.get(styles[0], styles[0])}-总结-{video_path.stem}.{first_fmt}")
+                                else f"{_style_cn.get(styles[0], styles[0])}-{video_path.stem}.{first_fmt}")
         if done_marker.exists() and get_state(folder) == "done":
             logger.info("已完成，跳过")
             return
@@ -131,7 +131,7 @@ class Pipeline:
                 logger.info("  风格: %s", style)
                 summary_text: str = self.summarizer.summarize(transcript_md, meta, style=style)
                 style_cn = _style_names.get(style, style)
-                save_formats(summary_text, folder / f"{style_cn}-总结-{video_path.stem}", formats, meta=meta)
+                save_formats(summary_text, folder / f"{style_cn}-{video_path.stem}", formats, meta=meta)
             set_state(folder, "done")
 
         # SRT 字幕（可选）
@@ -449,7 +449,9 @@ class Pipeline:
             for file in sorted(subdir.iterdir()):
                 if not file.is_file() or file.suffix not in exts:
                     continue
-                if "-总结" in file.stem or file.stem.startswith("总结-"):
+                # 总结文件：文件名以风格名开头（而非视频标题）
+                # 判断：stem 不是纯标题格式（标题来自 sanitize_filename，不含中划线前缀）
+                if file.stem.startswith(("全面总结-", "知识点-", "操作步骤-", "核心观点-", "专家深度-", "自定义-")):
                     shutil.copy2(file, summary_dir / file.name)
                     count_s += 1
                 else:

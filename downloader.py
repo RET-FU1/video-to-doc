@@ -33,6 +33,13 @@ class Downloader:
         return path.startswith(("http://", "https://"))
 
     @staticmethod
+    def _extract_url(text: str) -> Optional[str]:
+        """从文本中提取第一个 URL（抖音/B站 分享链接经常附带大量描述文字）"""
+        import re
+        urls = re.findall(r'https?://[^\s]+', text)
+        return urls[0].rstrip(".,;:!?）)】]") if urls else None
+
+    @staticmethod
     def _quality_to_format(quality: str) -> str:
         """将清晰度预设映射为 yt-dlp format 字符串"""
         mapping = {
@@ -101,8 +108,14 @@ class Downloader:
 
     def download(self, url: str, output_subdir: Optional[str] = None) -> Tuple[Path, Dict[str, Any]]:
         """下载视频或导入本地文件，返回 (video_path, meta)"""
+        # 自动从粘贴文本中提取 URL（抖音/B站分享常附带大量描述文字）
         if not self._is_url(url):
-            return self._import_local(url, output_subdir)
+            extracted = self._extract_url(url)
+            if extracted:
+                logger.info("从粘贴文本中提取到链接: %s", extracted)
+                url = extracted
+            else:
+                return self._import_local(url, output_subdir)
 
         meta: Dict[str, Any] = self._fetch_meta(url)
         title: str = sanitize_filename(meta.get("title", "untitled"))
