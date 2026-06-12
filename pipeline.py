@@ -150,6 +150,7 @@ class Pipeline:
         if translated_raw:
             zh_path = folder / f"{stem}_zh.txt"
             zh_path.unlink(missing_ok=True)
+        (folder / ".pipeline_state").unlink(missing_ok=True)
 
     def _polish_transcript(self, raw_text: str) -> str:
         """用 LLM 为转写文本添加标点并按语义分段（并行处理 + 重叠上下文）"""
