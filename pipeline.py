@@ -83,6 +83,7 @@ class Pipeline:
                                 else f"{_style_cn.get(styles[0], styles[0])}-{video_path.stem}.{first_fmt}")
         if done_marker.exists() and get_state(folder) == "done":
             logger.info("已完成，跳过")
+            (folder / ".pipeline_state").unlink(missing_ok=True)
             return
 
         transcript_raw: str = self._get_transcript(video_path, meta)
