@@ -41,14 +41,18 @@ class Downloader:
 
     @staticmethod
     def _quality_to_format(quality: str) -> str:
-        """将清晰度预设映射为 yt-dlp format 字符串"""
+        """将清晰度预设映射为 yt-dlp format 字符串
+
+        优先选择 AVC (H.264) 编码的视频流，避免 B站将 AV1 流分发到
+        不稳定的第三方 CDN（如 mountaintoys.cn）导致下载失败。
+        """
         mapping = {
-            "best":   "bestvideo+bestaudio/best",
-            "2160p":  "bestvideo[height<=2160]+bestaudio/best",
-            "1080p":  "bestvideo[height<=1080]+bestaudio/best",
-            "720p":   "bestvideo[height<=720]+bestaudio/best",
-            "480p":   "bestvideo[height<=480]+bestaudio/best",
-            "360p":   "bestvideo[height<=360]+bestaudio/best",
+            "best":   "bestvideo[vcodec^=avc]+bestaudio/bestvideo+bestaudio/best",
+            "2160p":  "bestvideo[height<=2160][vcodec^=avc]+bestaudio/bestvideo[height<=2160]+bestaudio/best",
+            "1080p":  "bestvideo[height<=1080][vcodec^=avc]+bestaudio/bestvideo[height<=1080]+bestaudio/best",
+            "720p":   "bestvideo[height<=720][vcodec^=avc]+bestaudio/bestvideo[height<=720]+bestaudio/best",
+            "480p":   "bestvideo[height<=480][vcodec^=avc]+bestaudio/bestvideo[height<=480]+bestaudio/best",
+            "360p":   "bestvideo[height<=360][vcodec^=avc]+bestaudio/bestvideo[height<=360]+bestaudio/best",
             "audio":  "bestaudio/best",
         }
         return mapping.get(quality, mapping["1080p"])
@@ -84,13 +88,7 @@ class Downloader:
             "progress_hooks": [self._progress_hook],
             "retries": retries,
             "fragment_retries": fragment_retries,
-            "concurrent_fragment_downloads": 8,  # 并行下载分片，加速
             "socket_timeout": socket_timeout,
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5",
-            },
         }
         if no_playlist:
             opts["noplaylist"] = True
@@ -252,12 +250,7 @@ class Downloader:
     def _fetch_meta(self, url: str) -> Dict[str, Any]:
         """获取视频元信息"""
         ytdlp = self._get_ytdlp()
-        base_args = [
-            ytdlp, "--dump-json", "--no-playlist",
-            "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "--add-header", "Accept-Language:zh-CN,zh;q=0.9,en;q=0.5",
-        ]
+        base_args = [ytdlp, "--dump-json", "--no-playlist"]
         cookies: str = self.dl_config.get("cookies_file", "")
         if cookies and Path(cookies).exists():
             base_args.extend(["--cookies", cookies])
@@ -328,11 +321,6 @@ class Downloader:
         try:
             opts = {
                 "quiet": True, "no_warnings": False, "skip_download": True,
-                "http_headers": {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5",
-                },
             }
             cookies: str = self.dl_config.get("cookies_file", "")
             if cookies and Path(cookies).exists():
@@ -393,11 +381,6 @@ class Downloader:
             "subtitleslangs": [lang],
             "subtitlesformat": "srt",
             "outtmpl": str(folder / f"{stem}.%(ext)s"),
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5",
-            },
         }
         if cookies and Path(cookies).exists():
             dl_opts["cookiefile"] = cookies
