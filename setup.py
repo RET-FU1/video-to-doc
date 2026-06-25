@@ -80,8 +80,7 @@ def step3_download_model():
         )
     except subprocess.CalledProcessError:
         print("\n[WARN] 模型下载失败，可稍后手动运行:")
-        print(f"  {python} download_model.py                       # ModelScope（国内快）")
-        print(f"  {python} download_model.py --source huggingface  # HuggingFace")
+        print(f"  {python} download_model.py")
 
 
 def step4_check_ffmpeg():
