@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).parent.resolve()
 VENV_DIR = PROJECT_ROOT / "venv"
 REQUIREMENTS = PROJECT_ROOT / "requirements.txt"
 MODEL_CACHE = PROJECT_ROOT / "models"
-PIP_INDEX = "https://pypi.tuna.tsinghua.edu.cn/simple"
+PIP_INDEX = "https://pypi.org/simple"
 
 
 def run(cmd, **kwargs):
