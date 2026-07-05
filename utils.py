@@ -276,11 +276,12 @@ def validate_config(config: dict) -> List[str]:
     if not isinstance(summarizer, dict):
         errors.append("summarizer 配置应为字典")
     else:
-        provider = summarizer.get("provider", "openai")
-        if provider not in ("openai", "ollama"):
-            errors.append(f"summarizer.provider 无效值 '{provider}'，可选: openai, ollama")
-        if "model" not in summarizer:
-            errors.append("summarizer 缺少必填项 model")
+        # 优先校验 api_provider，兼容旧字段 provider
+        api_provider = summarizer.get("api_provider", "") or summarizer.get("provider", "")
+        valid_providers = ("deepseek", "zhipu", "tongyi", "moonshot", "ollama", "mimo")
+        if api_provider and api_provider not in valid_providers:
+            errors.append(f"summarizer.api_provider 未知值 '{api_provider}'，可选: {', '.join(valid_providers)}")
+        # model 可选：使用预设 (deepseek 等) 时自动填充，自定义时才需手动指定
         max_chunk = summarizer.get("max_chunk_chars", 80000)
         if not isinstance(max_chunk, (int, float)) or max_chunk < 1000:
             errors.append(f"summarizer.max_chunk_chars 值无效，应为 >= 1000 的整数")
