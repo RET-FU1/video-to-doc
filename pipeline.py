@@ -111,7 +111,7 @@ class Pipeline:
         try:
             multi_speaker: bool = self.config.get("summarizer", {}).get("multi_speaker", False)
             if multi_speaker:
-                transcript_md = self._polish_multispeaker_transcript(text_to_polish)
+                transcript_md = self._polish_transcript(text_to_polish, multispeaker=True)
             else:
                 transcript_md = self._polish_transcript(text_to_polish)
         except Exception as e:
@@ -153,13 +153,18 @@ class Pipeline:
             zh_path.unlink(missing_ok=True)
         (folder / ".pipeline_state").unlink(missing_ok=True)
 
-    def _polish_transcript(self, raw_text: str) -> str:
-        """用 LLM 为转写文本添加标点并按语义分段（并行处理 + 重叠上下文）"""
+    def _polish_transcript(self, raw_text: str, multispeaker: bool = False) -> str:
+        """并行抛光：分块 → LLM 处理 → 去重叠合并
+
+        multispeaker=False: 标点 + 分段
+        multispeaker=True:  说话人识别 + 标点 + 分段
+        """
         max_input_chars: int = 5000
         overlap: int = 300
+        label = "多说话人抛光" if multispeaker else "抛光"
 
         if len(raw_text) <= max_input_chars:
-            return self._polish_chunk(raw_text)
+            return self._polish_chunk(raw_text, multispeaker=multispeaker)
 
         chunks = split_text_with_overlap(raw_text, max_input_chars, overlap, sep="\n")
         polished: List[Optional[str]] = [None] * len(chunks)
@@ -167,7 +172,7 @@ class Pipeline:
         max_workers = min(4, len(chunks))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(self._polish_chunk, chunk): i
+                executor.submit(self._polish_chunk, chunk, multispeaker): i
                 for i, chunk in enumerate(chunks)
             }
             for future in as_completed(futures):
@@ -175,25 +180,33 @@ class Pipeline:
                 try:
                     polished[i] = future.result()
                 except Exception as e:
-                    logger.warning("分段 %d 抛光失败，使用原文: %s", i + 1, e)
+                    logger.warning("%s分段 %d 失败，使用原文: %s", label, i + 1, e)
                     polished[i] = chunks[i]
 
         # 合并：每块开头包含上一块的末尾作为上下文（重叠区域），需去除
         result: str = polished[0] or ""
         for i in range(1, len(polished)):
             chunk = polished[i] or ""
-            # 优先按段落边界去除重叠（LLM 通常以空行分隔段落）
             parts = chunk.split("\n\n", 1)
             if len(parts) > 1:
                 result += "\n\n" + parts[1]
             elif "\n" in chunk:
-                # 无段落分隔时回退按首行去除
                 lines = chunk.split("\n", 1)
                 result += "\n\n" + lines[1].lstrip() if len(lines) > 1 else ""
             else:
                 result += "\n\n" + chunk
 
         return result
+
+    def _polish_chunk(self, text: str, multispeaker: bool = False) -> str:
+        try:
+            if multispeaker:
+                return self.summarizer.polish_multispeaker(text)
+            return self.summarizer.polish(text)
+        except Exception as e:
+            label = "多说话人抛光" if multispeaker else "抛光"
+            logger.warning("%s失败，使用原文: %s", label, e)
+            return text
 
     @staticmethod
     def _add_timestamps(text: str, segments_path: Path) -> str:
@@ -239,60 +252,6 @@ class Pipeline:
             lines.insert(idx, f"## {title}")
 
         return "\n".join(lines)
-
-    def _polish_chunk(self, text: str) -> str:
-        try:
-            return self.summarizer.polish(text)
-        except Exception as e:
-            logger.warning("抛光失败，使用原文: %s", e)
-            return text
-
-    def _polish_multispeaker_transcript(self, raw_text: str) -> str:
-        """用 LLM 为转写文本做说话人识别 + 标点分段（并行处理 + 重叠上下文）"""
-        max_input_chars: int = 5000
-        overlap: int = 300
-
-        if len(raw_text) <= max_input_chars:
-            return self._polish_multispeaker_chunk(raw_text)
-
-        chunks = split_text_with_overlap(raw_text, max_input_chars, overlap, sep="\n")
-        polished: List[Optional[str]] = [None] * len(chunks)
-
-        max_workers = min(4, len(chunks))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(self._polish_multispeaker_chunk, chunk): i
-                for i, chunk in enumerate(chunks)
-            }
-            for future in as_completed(futures):
-                i = futures[future]
-                try:
-                    polished[i] = future.result()
-                except Exception as e:
-                    logger.warning("多说话人抛光分段 %d 失败，使用原文: %s", i + 1, e)
-                    polished[i] = chunks[i]
-
-        # 合并：每块开头包含上一块的末尾作为上下文（重叠区域），需去除
-        result: str = polished[0] or ""
-        for i in range(1, len(polished)):
-            chunk = polished[i] or ""
-            parts = chunk.split("\n\n", 1)
-            if len(parts) > 1:
-                result += "\n\n" + parts[1]
-            elif "\n" in chunk:
-                lines = chunk.split("\n", 1)
-                result += "\n\n" + lines[1].lstrip() if len(lines) > 1 else ""
-            else:
-                result += "\n\n" + chunk
-
-        return result
-
-    def _polish_multispeaker_chunk(self, text: str) -> str:
-        try:
-            return self.summarizer.polish_multispeaker(text)
-        except Exception as e:
-            logger.warning("多说话人抛光失败，使用原文: %s", e)
-            return text
 
     def _translate_transcript(self, raw_text: str) -> str:
         """逐行翻译转写文本，保持行结构以对齐 SRT 时间戳"""
