@@ -51,12 +51,43 @@ def step1_create_venv():
 
 
 def step2_install_deps():
-    """安装依赖"""
+    """安装依赖，自动检测 CUDA 版本"""
     print("[2/6] 安装 Python 依赖...")
     pip = get_pip()
-    run([pip, "install", "-r", str(REQUIREMENTS), "-i", PIP_INDEX,
-         "--trusted-host", "pypi.tuna.tsinghua.edu.cn"])
+    # 1. 安装核心依赖
+    run([pip, "install", "-r", str(REQUIREMENTS), "-i", PIP_INDEX])
+    # 2. 检测 CUDA 版本，按需安装 GPU 库
+    cuda_ver = _detect_cuda_version()
+    if cuda_ver:
+        print(f"  检测到 CUDA {cuda_ver}，安装对应 GPU 加速库...")
+        pkg = f"nvidia-cublas-cu{cuda_ver}"
+        run([pip, "install", pkg, "-i", PIP_INDEX])
+    else:
+        print("  未检测到 CUDA，跳过 GPU 加速库（将使用 CPU 转写）")
     print("  依赖安装完成")
+
+
+def _detect_cuda_version():
+    """检测 CUDA 主版本号（11/12/13），无则返回 None
+
+    通过 nvidia-smi 读取驱动支持的 CUDA 版本，不依赖硬件型号。
+    RTX 3050 驱动够新就能跑 CUDA 12，旧驱动回退 CUDA 11。
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            return None
+        # nvidia-smi 顶部有一行 "CUDA Version: 12.X"
+        for line in result.stdout.split("\n"):
+            if "CUDA Version" in line:
+                ver_str = line.strip().split()[-1]
+                return int(ver_str.split(".")[0])
+        return None
+    except Exception:
+        return None
 
 
 def step3_download_model():
@@ -117,7 +148,7 @@ def step5_check_gpu():
                     raise OSError("cuBLAS not found")
             except OSError:
                 print("  [WARN] cuBLAS 未找到，将使用 CPU 转写")
-                print("  如需 GPU 加速，请确保已安装 CUDA Toolkit 或 pip install nvidia-cublas-cu12")
+                print("  如需 GPU 加速，请确保已安装 CUDA Toolkit 并重新运行 python setup.py")
         else:
             print("  未检测到 NVIDIA GPU，将使用 CPU 转写")
     except FileNotFoundError:
