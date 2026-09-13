@@ -19,7 +19,7 @@ API_PROVIDERS = {
         "name": "DeepSeek",
         "base_url": "https://api.deepseek.com",
         "model": "deepseek-v4-pro",
-        "polish_model": "deepseek-v4-flash",
+        "polish_model": "deepseek-flash",
         "description": "推荐，国内直连，10 元用很久",
     },
     "zhipu": {
@@ -186,17 +186,37 @@ class OpenAICompatSummarizer:
 
     def _call_api(self, messages: list, max_tokens: Optional[int] = None,
                   timeout: Optional[float] = None, model: Optional[str] = None) -> str:
-        """带重试的 API 调用"""
+        """带重试的 API 调用。
+
+        推理模型（DeepSeek V4 系列等）会先输出思考内容再输出正文，
+        max_tokens 限制的是「思考 + 正文」的总预算。思考过长时正文
+        可能为空或被截断（finish_reason == "length"）。此时把 token
+        预算加倍重试（最多加倍 2 次），避免静默产出空白/半截内容。
+        """
+        tokens: int = max_tokens or self.max_tokens
         last_exc: Optional[Exception] = None
-        for attempt in range(self._max_retries):
+        escalated: int = 0  # 已因正文缺失而加倍的次数
+
+        for attempt in range(self._max_retries + 2):
             try:
                 response = self.client.chat.completions.create(
                     model=model or self.model,
-                    max_tokens=max_tokens or self.max_tokens,
+                    max_tokens=tokens,
                     messages=messages,
                     timeout=timeout or self._timeout,
                 )
-                content: Optional[str] = response.choices[0].message.content
+                choice = response.choices[0]
+                content: Optional[str] = choice.message.content
+                finish: str = choice.finish_reason or ""
+
+                if (not content or finish == "length") and escalated < 2:
+                    escalated += 1
+                    reason = "正文为空（思考占满预算）" if not content else "正文疑似截断"
+                    logger.warning("%s: finish=%s, max_tokens=%d，预算加倍到 %d 后重试",
+                                   reason, finish, tokens, tokens * 2)
+                    tokens *= 2
+                    continue
+
                 return content or ""
             except _RETRYABLE_ERRORS as e:
                 last_exc = e

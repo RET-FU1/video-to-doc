@@ -26,8 +26,11 @@ summarizer:
   base_url: ''
   custom_prompt: ''
   max_chunk_chars: 80000
-  max_tokens: 4096
-  model: ''
+  max_tokens: 8192
+  model: 'deepseek-flash'
+  # 2026-09-13 修复：V4.1 Flash 内测版（expires-on-0910）已于 09-10 到期，
+  # 官方模型列表现仅剩 deepseek-flash 和 deepseek-v4-pro，正式版改名为 deepseek-flash。
+  # max_tokens 从 4096 提到 8192：推理模型的思考过程也占该预算，太小会导致正文为空。
   multi_speaker: false
   output_formats:
   - md
