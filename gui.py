@@ -45,10 +45,10 @@ C = {
 }
 
 F = {
-    "header":  ("Segoe UI", 18, "bold"),
-    "section": ("Segoe UI", 11, "bold"),
-    "body":    ("Segoe UI", 10),
-    "small":   ("Segoe UI", 9),
+    "header":  ("Microsoft YaHei UI", 18, "bold"),
+    "section": ("Microsoft YaHei UI", 11, "bold"),
+    "body":    ("Microsoft YaHei UI", 10),
+    "small":   ("Microsoft YaHei UI", 9),
     "mono":    ("Consolas", 10),
 }
 
