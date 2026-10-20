@@ -210,6 +210,37 @@ class TestResumeSemantics:
         assert p.transcriber.calls == transcribe_calls, "第二次运行不应重复转写"
         assert (folder / ".pipeline_state").exists(), "跳过时不应删除状态"
 
+    def test_adding_style_or_format_backfills(self, tmp_path):
+        """回归：先跑 auto/md，再改成 auto+expert、md+txt 重跑。
+
+        旧实现只看 styles[0]+formats[0] 的产物是否存在，于是直接"已完成，跳过"，
+        expert 总结和 txt 文件永远不会生成。现在必须校验**全部**请求的产物。
+        """
+        p = make_pipeline(tmp_path, styles=["auto"], formats=("md",))
+        video, folder = _prepare_video(tmp_path)
+        p._process_one(video, {"title": "T"})
+        assert not (folder / f"{STYLE_CN['expert']}-视频.md").exists()
+
+        # 同目录、同视频，但这次要多生成一个风格和一个格式
+        p2 = make_pipeline(tmp_path, styles=["auto", "expert"], formats=("md", "txt"))
+        p2._process_one(video, {"title": "T"})
+
+        assert (folder / f"{STYLE_CN['expert']}-视频.md").exists(), "新增风格应被补齐"
+        assert (folder / f"{STYLE_CN['auto']}-视频.txt").exists(), "新增格式应被补齐"
+
+    def test_missing_srt_triggers_rerun(self, tmp_path):
+        """回归：勾了生成字幕但 .srt 丢了，重跑必须补出来而不是"已完成，跳过"。"""
+        p = make_pipeline(tmp_path, srt=True)
+        video, folder = _prepare_video(tmp_path)
+        p._process_one(video, {"title": "T"})
+        srt = folder / "视频.srt"
+        assert srt.exists(), "首次运行应生成 SRT"
+        srt.unlink()
+
+        calls_before = p.transcriber.calls
+        p._process_one(video, {"title": "T"})
+        assert srt.exists(), "SRT 缺失时重跑应补生成"
+
     def test_delete_output_reruns_without_asr(self, tmp_path):
         """删掉 md 重跑：应复用 segments 重建，不重跑 ASR"""
         p = make_pipeline(tmp_path)
@@ -251,3 +282,49 @@ class TestPolishInputIntegration:
         md = (folder / "视频.md").read_text(encoding="utf-8")
         import re
         assert not re.search(r"\[\d{1,3}:\d{2}\]", md), "最终文档不应残留时间戳"
+
+
+class TestBatchFailureCount:
+    """复核者指出：process_folder / _process_playlist 以前对单个文件失败只打
+    [FAIL] 然后继续，最后仍打"全部完成"，GUI 无从得知有失败。"""
+
+    def test_process_folder_counts_failures(self, tmp_path, monkeypatch):
+        p = make_pipeline(tmp_path)
+        src = tmp_path / "batch"
+        src.mkdir()
+        for name in ("a.mp4", "b.mp4", "c.mp4"):
+            (src / name).write_bytes(b"x")
+
+        calls = {"n": 0}
+
+        def fake_process_one(video_path, meta):
+            calls["n"] += 1
+            if video_path.stem in ("b", "c"):
+                raise RuntimeError("模拟失败")
+
+        class _StubDownloader:
+            def _import_local(self, path, output_subdir=None):
+                return Path(path), {"title": Path(path).stem}
+
+        p.downloader = _StubDownloader()
+        monkeypatch.setattr(p, "_process_one", fake_process_one)
+        monkeypatch.setattr(p, "_collect_outputs", lambda *a, **k: None)
+        p.process_folder(str(src))
+
+        assert calls["n"] == 3
+        assert p.last_failures == 2, f"应记录 2 个失败，实际 {p.last_failures}"
+
+    def test_process_folder_all_ok_reports_zero(self, tmp_path, monkeypatch):
+        p = make_pipeline(tmp_path)
+        src = tmp_path / "batch"
+        src.mkdir()
+        (src / "a.mp4").write_bytes(b"x")
+        class _StubDownloader:
+            def _import_local(self, path, output_subdir=None):
+                return Path(path), {"title": Path(path).stem}
+
+        p.downloader = _StubDownloader()
+        monkeypatch.setattr(p, "_process_one", lambda v, m: None)
+        monkeypatch.setattr(p, "_collect_outputs", lambda *a, **k: None)
+        p.process_folder(str(src))
+        assert p.last_failures == 0

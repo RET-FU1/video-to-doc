@@ -23,6 +23,7 @@ if _VENV_PYTHON.exists() and _VENV_PYTHON.resolve() != Path(sys.executable).reso
 
 import logging
 import os
+import queue
 import subprocess
 import threading
 from contextlib import contextmanager
@@ -176,9 +177,12 @@ class App:
         self.root.minsize(760, 620)
         # 取消令牌：start() 时新建，stop() 时 cancel()
         self._cancel_token = CancelToken()
+        # worker → 主线程的 UI 操作队列（tkinter 非线程安全，见 _ui/_pump_ui）
+        self._ui_queue: "queue.Queue" = queue.Queue()
         self._style_probe = ttk.Style(self.root)
         self._build_ui()
         self._center_window(940, 940)
+        self.root.after(40, self._pump_ui)
 
     # ------------------------------------------------------------------
     # 布局
@@ -557,6 +561,42 @@ class App:
             self.output_dir_var.set(path)
 
     # ------------------------------------------------------------------
+    # 跨线程 UI 派发
+    # ------------------------------------------------------------------
+
+    def _ui(self, fn) -> None:
+        """把 UI 操作派发到主线程。
+
+        tkinter 不是线程安全的：worker 线程直接调 `root.after()` 会在 Tcl 层
+        抛 `RuntimeError: main thread is not in main loop`，一旦抛在 finally
+        里，`_done()` 就永远不会执行，界面永久卡在"处理中"（实测踩到）。
+        这里统一走队列，由主线程的 `_pump_ui` 定时取出来执行。
+        """
+        if threading.current_thread() is threading.main_thread():
+            fn()
+            return
+        self._ui_queue.put(fn)
+
+    def _pump_ui(self) -> None:
+        """主线程定时排空 UI 队列"""
+        try:
+            while True:
+                fn = self._ui_queue.get_nowait()
+                try:
+                    fn()
+                except tk.TclError:
+                    pass          # 窗口已销毁，忽略
+                except Exception:  # noqa: BLE001 - 单个回调失败不能拖垮泵
+                    pass
+        except queue.Empty:
+            pass
+        finally:
+            try:
+                self.root.after(40, self._pump_ui)
+            except tk.TclError:
+                pass
+
+    # ------------------------------------------------------------------
     # 日志
     # ------------------------------------------------------------------
 
@@ -574,9 +614,9 @@ class App:
         return None
 
     def _log(self, text):
-        if threading.current_thread() is not threading.main_thread():
-            self.root.after(0, lambda t=text: self._log(t))
-            return
+        self._ui(lambda: self._append_log(text))
+
+    def _append_log(self, text):
         tag = self._log_tag(text)
         self.log.configure(state="normal")
         self.log.insert("end", text + "\n", tag or ())
@@ -584,11 +624,10 @@ class App:
         self.log.configure(state="disabled")
 
     def _set_status(self, text):
-        if threading.current_thread() is not threading.main_thread():
-            self.root.after(0, lambda t=text: self._set_status(t))
-            return
-        self.status_label.configure(text=text)
-        self._status_pill.configure(text=text)
+        def _apply():
+            self.status_label.configure(text=text)
+            self._status_pill.configure(text=text)
+        self._ui(_apply)
 
     # ------------------------------------------------------------------
     # 业务逻辑
@@ -611,6 +650,25 @@ class App:
 
         self._cancel_token = CancelToken()
 
+        # 只在**主线程**读一次所有 tkinter 变量，打包成普通 dict 交给 worker。
+        # tkinter 不是线程安全的：worker 线程直接 get() BooleanVar / Text
+        # 在 Tcl 层可能报 "main thread is not in main loop" 或读到半更新状态。
+        job = {
+            "formats": [fmt for var, fmt in
+                        ((self.fmt_md, "md"), (self.fmt_txt, "txt"),
+                         (self.fmt_html, "html")) if var.get()],
+            "styles": [k for k, (var, _) in self.style_checkboxes.items() if var.get()],
+            "custom_prompt": self.custom_prompt_text.get("1.0", "end-1c").strip(),
+            "multi_speaker": self.multi_speaker_var.get(),
+            "translate": self.translate_var.get(),
+            "srt": self.srt_var.get(),
+            "skip_summary": self.nosummary_var.get(),
+            "dlonly": self.dlonly_var.get(),
+            "playlist": self.playlist_var.get(),
+            "folder": self.folder_var.get(),
+            "output_dir": self.output_dir_var.get().strip(),
+        }
+
         self.start_btn.pack_forget()
         self.stop_btn.pack(side="left", padx=(0, 8))
         self.stop_btn.configure(state="normal")
@@ -619,7 +677,7 @@ class App:
         self._log(f"共 {len(urls)} 个任务，开始处理…")
         self._set_status(f"处理中 0/{len(urls)}")
 
-        threading.Thread(target=self._run, args=(urls, self._cancel_token),
+        threading.Thread(target=self._run, args=(urls, self._cancel_token, job),
                          daemon=True).start()
 
     def stop(self):
@@ -631,42 +689,36 @@ class App:
         self._set_status("正在停止…")
         self._log("[WARN] 收到停止请求，正在中断当前任务…")
 
-    def _run(self, urls, cancel_token):
-        formats = []
-        if self.fmt_md.get():   formats.append("md")
-        if self.fmt_txt.get():  formats.append("txt")
-        if self.fmt_html.get(): formats.append("html")
-
-        selected_styles = [key for key, (var, _) in self.style_checkboxes.items() if var.get()]
-        if not selected_styles:
-            selected_styles = ["auto"]
-
-        with open(PROJECT_ROOT / "config.yaml", "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-        load_env()
-
-        summarizer_cfg = config.setdefault("summarizer", {})
-        summarizer_cfg["summary_styles"] = selected_styles
-        if "custom" in selected_styles:
-            custom_prompt = self.custom_prompt_text.get("1.0", "end-1c").strip()
-            if custom_prompt:
-                summarizer_cfg["custom_prompt"] = custom_prompt
-        summarizer_cfg["output_formats"] = formats
-        if self.multi_speaker_var.get():
-            config.setdefault("summarizer", {})["multi_speaker"] = True
-        output_dir = self.output_dir_var.get().strip()
-        if output_dir:
-            config["output_dir"] = output_dir
+    def _run(self, urls, cancel_token, job):
+        """worker 线程：只使用 job 里快照好的普通值，不碰任何 tkinter 对象"""
+        formats = job["formats"]
+        selected_styles = job["styles"] or ["auto"]
 
         handler = _GuiLogHandler(self)
         handler.setFormatter(logging.Formatter("%(message)s"))
         root_logger = logging.getLogger()
         root_logger.addHandler(handler)
+        failed = 0
         try:
+            # 读配置也放进 try：config.yaml 损坏 / 缺文件时不能卡在"处理中"
+            with open(PROJECT_ROOT / "config.yaml", "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+            load_env()
+
+            summarizer_cfg = config.setdefault("summarizer", {})
+            summarizer_cfg["summary_styles"] = selected_styles
+            if "custom" in selected_styles and job["custom_prompt"]:
+                summarizer_cfg["custom_prompt"] = job["custom_prompt"]
+            summarizer_cfg["output_formats"] = formats
+            if job["multi_speaker"]:
+                config.setdefault("summarizer", {})["multi_speaker"] = True
+            if job["output_dir"]:
+                config["output_dir"] = job["output_dir"]
+
             pipeline = Pipeline(config,
-                                translate=self.translate_var.get(),
-                                srt=self.srt_var.get(),
-                                skip_summary=self.nosummary_var.get(),
+                                translate=job["translate"],
+                                srt=job["srt"],
+                                skip_summary=job["skip_summary"],
                                 cancel_token=cancel_token)
 
             for i, url in enumerate(urls):
@@ -676,22 +728,31 @@ class App:
                 self._log(f"\n[{i+1}/{len(urls)}] {url}")
 
                 try:
-                    if self.dlonly_var.get():
-                        pipeline.download_only(url, is_playlist=self.playlist_var.get())
-                    elif self.folder_var.get():
+                    if job["dlonly"]:
+                        pipeline.download_only(url, is_playlist=job["playlist"])
+                    elif job["folder"]:
+                        pipeline.last_failures = 0
                         pipeline.process_folder(url)
-                    elif self.playlist_var.get():
+                        failed += pipeline.last_failures
+                    elif job["playlist"]:
+                        pipeline.last_failures = 0
                         pipeline.process(url, is_playlist=True)
+                        failed += pipeline.last_failures
                     else:
                         pipeline.process(url)
                 except CancelledError:
                     raise
                 except Exception as e:
+                    failed += 1
                     self._log(f"  [错误] {e}")
 
             if cancel_token.cancelled:
                 self._log("[WARN] 已停止，进度已保存")
                 self._set_status("已停止")
+            elif failed:
+                # 部分失败就不能报"全部完成"，否则用户会以为产物齐全
+                self._log(f"\n完成，但有 {failed}/{len(urls)} 个任务失败（见上方 [错误]）")
+                self._set_status(f"完成（{failed} 个失败）")
             else:
                 self._log("\n全部完成！")
                 self._set_status("完成")
@@ -704,7 +765,7 @@ class App:
             self._set_status("出错")
         finally:
             root_logger.removeHandler(handler)
-            self.root.after(0, self._done)
+            self._ui(self._done)
 
     def _done(self):
         self.progress.stop()

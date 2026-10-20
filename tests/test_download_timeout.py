@@ -50,7 +50,7 @@ class TestDownloadTimeout:
         d = _dl(tmp_path, timeout=1)
         start = time.time()
         try:
-            d._download_with_timeout(_SlowYDL(30), "http://x", 1.0, start)
+            d._download_with_timeout(_SlowYDL(30), "http://x", start + 1.0, start)
         except _DownloadTimeout as e:
             assert "超过" in str(e)
             assert time.time() - start < 10, "看门狗应在 ~1 秒内触发"
@@ -65,12 +65,12 @@ class TestDownloadTimeout:
                 time.sleep(0.1)
 
         d = _dl(tmp_path, timeout=0)
-        d._download_with_timeout(FastYDL(), "http://x", 0, time.time())
+        d._download_with_timeout(FastYDL(), "http://x", 0.0, time.time())
 
     def test_propagates_download_error(self, tmp_path):
         d = _dl(tmp_path, timeout=60)
         try:
-            d._download_with_timeout(_FailingYDL(), "http://x", 60, time.time())
+            d._download_with_timeout(_FailingYDL(), "http://x", time.time() + 60, time.time())
         except RuntimeError as e:
             assert "模拟下载失败" in str(e)
             return
@@ -82,7 +82,7 @@ class TestDownloadTimeout:
         d = Downloader({"downloader": {"timeout": 60}}, tmp_path, cancel_token=tok)
         start = time.time()
         try:
-            d._download_with_timeout(_SlowYDL(30), "http://x", 60, start)
+            d._download_with_timeout(_SlowYDL(30), "http://x", start + 60, start)
         except CancelledError:
             assert time.time() - start < 10, "取消应立即生效"
             return
@@ -94,7 +94,7 @@ class TestDownloadTimeout:
                 return None
 
         d = _dl(tmp_path, timeout=60)
-        d._download_with_timeout(FastYDL(), "http://x", 60, time.time())
+        d._download_with_timeout(FastYDL(), "http://x", time.time() + 60, time.time())
 
 
 class TestProgressHook:

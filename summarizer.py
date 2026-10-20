@@ -354,13 +354,26 @@ class OpenAICompatSummarizer:
                     tokens *= 2
                     continue
 
+                if finish == "length":
+                    # 加倍两次仍被截断：内容只有前半截，不能静默当成功写盘。
+                    if not content:
+                        raise RuntimeError(
+                            f"模型在 max_tokens={tokens} 下仍未产出正文"
+                            f"（思考占满了预算）。请调大 config.yaml → summarizer.max_tokens")
+                    # 有正文但被截断：仍然写盘（总比没有好），但必须让用户看见
+                    logger.error(
+                        "总结被长度限制截断（finish=length，max_tokens=%d）："
+                        "已保存现有内容，如需完整版本请调大 summarizer.max_tokens 后重跑",
+                        tokens)
                 return content or ""
             except _RETRYABLE_ERRORS as e:
                 last_exc = e
                 wait = 2 ** attempt
                 logger.warning("API 调用失败 [%d/%d]: %s，%ds 后重试", attempt + 1, self._max_retries, e, wait)
                 time.sleep(wait)
-            except Exception as e:
+            except RuntimeError:
+                raise
+            except Exception:
                 raise
 
         raise RuntimeError(f"API 调用失败（已重试 {self._max_retries} 次）: {last_exc}")

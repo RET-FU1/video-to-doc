@@ -86,17 +86,17 @@ class TestExtractAudioError:
 class TestDownloaderAudioCheck:
     def test_audio_file_always_passes(self, tmp_path):
         d = Downloader({"downloader": {}}, tmp_path)
-        assert d._ensure_has_audio(tmp_path / "x.m4a", tmp_path) is True
-        assert d._ensure_has_audio(tmp_path / "x.mp3", tmp_path) is True
+        assert d._ensure_has_audio(tmp_path / "x.m4a") is True
+        assert d._ensure_has_audio(tmp_path / "x.mp3") is True
 
     @needs_ffmpeg
     def test_video_without_audio_rejected(self, tmp_path):
         d = Downloader({"downloader": {}}, tmp_path)
         video = _make_video(tmp_path / "no_audio.mp4", with_audio=False)
-        assert d._ensure_has_audio(video, tmp_path) is False
+        assert d._ensure_has_audio(video) is False
 
     @needs_ffmpeg
     def test_video_with_audio_accepted(self, tmp_path):
         d = Downloader({"downloader": {}}, tmp_path)
         video = _make_video(tmp_path / "with_audio.mp4", with_audio=True)
-        assert d._ensure_has_audio(video, tmp_path) is True
+        assert d._ensure_has_audio(video) is True

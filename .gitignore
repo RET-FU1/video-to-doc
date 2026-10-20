@@ -2,6 +2,11 @@ venv/
 output/
 models/
 .env
+.env.*
+!.env.example
+*.log
+.venv/
+pytest-of-*/
 __pycache__/
 *.pyc
 *.pyo

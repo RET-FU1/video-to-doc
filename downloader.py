@@ -6,6 +6,7 @@ import json
 import logging
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,6 +16,15 @@ from utils import (sanitize_filename, set_state, is_done, python_module_cmd,
                    fmt_size)
 
 logger = logging.getLogger(__name__)
+
+# 慢节点速度采样间隔（秒）。1 秒一次对真实下载足够灵敏；
+# 测试里会临时调小，这样验证判定逻辑不必真的等好几秒。
+_SPEED_SAMPLE_INTERVAL = 1.0
+# 看门狗轮询间隔（秒）：越小则"停止"响应越快，但空转开销也越大。
+_WATCHDOG_POLL = 0.25
+# 叫停工作线程后最多等多久（秒）。若线程卡死在 socket 读上、根本没有进度
+# 回调可触发，就不再无谓死等，直接弃用本次尝试、换下一个候选。
+_ABORT_JOIN_TIMEOUT = 3.0
 
 
 class _YdlLogger:
@@ -46,6 +56,10 @@ class _SlowDownload(RuntimeError):
     """下载速度持续低于阈值，判定为抽到了坏 CDN 节点，主动放弃换节点"""
 
 
+class _Aborted(Exception):
+    """主线程要求中止本次 yt-dlp 下载（由 progress_hook 抛出，让 yt-dlp 自己退出）"""
+
+
 class Downloader:
     def __init__(self, config: Dict[str, Any], output_root: Path,
                  cancel_token: Optional[CancelToken] = None) -> None:
@@ -61,6 +75,8 @@ class Downloader:
         self._speed_samples: List[float] = []
         self._last_speed_bytes: int = 0
         self._last_speed_at: float = time.time()
+        # 中止开关：主线程置位后，progress_hook 抛 _Aborted 让 yt-dlp 收手
+        self._abort: threading.Event = threading.Event()
 
     @staticmethod
     def _ytdlp_cmd() -> list[str]:
@@ -196,10 +212,16 @@ class Downloader:
         return candidates
 
     def _progress_hook(self, d: Dict[str, Any]) -> None:
-        """yt-dlp 下载进度回调
+        """yt-dlp 下载进度回调（纯记录，**不**判断中止）
 
         每秒可能触发多次，这里限流成"每 10 秒一条 INFO"，让用户在 GUI 里
         能看到"到底下到哪了"，而不是盯着一个空目录以为卡死。
+
+        中止判断**不在这里**：`_ytdlp_opts()` 会给每次下载包一层闭包，
+        闭包里持有本次下载专属的 abort Event 并在置位时抛 _Aborted。
+        如果把检查放在这个方法里（读共享的 self._abort），那么上一次下载
+        因慢节点/取消置位后，下一次下载（尤其播放列表那条路径）的第一次
+        进度回调就会立刻抛 _Aborted —— 表现为"播放列表直接失败"。
         """
         status = d.get("status", "")
         if status == "downloading":
@@ -223,8 +245,14 @@ class Downloader:
     def _ytdlp_opts(self, folder: Path, template: str, *,
                      no_playlist: bool = True,
                      format_override: Optional[str] = None,
-                     retries_override: Optional[int] = None) -> Dict[str, Any]:
-        """构建 yt-dlp Python API 选项"""
+                     retries_override: Optional[int] = None,
+                     abort_event: Optional[threading.Event] = None) -> Dict[str, Any]:
+        """构建 yt-dlp Python API 选项
+
+        `abort_event` 用于打断本次下载：每次尝试传一个**独立的** Event，
+        progress_hook 检查它并抛 _Aborted。绝不能共用一个实例 ——
+        否则下一轮 clear() 会让上一轮残留的线程"复活"。
+        """
         retries: int = int(self.dl_config.get("retries", 10))
         fragment_retries: int = int(self.dl_config.get("fragment_retries", 30))
         if retries_override is not None:
@@ -235,13 +263,20 @@ class Downloader:
         fmt = format_override or self.dl_config.get("format", "")
         if not fmt:
             fmt = self._quality_to_format(self.dl_config.get("quality", "1080p"))
+        abort = abort_event if abort_event is not None else threading.Event()
+
+        def _hook(d: Dict[str, Any]) -> None:
+            if abort.is_set():
+                raise _Aborted()
+            self._progress_hook(d)
+
         opts: Dict[str, Any] = {
             "outtmpl": str(folder / template),
             "format": fmt,
             "merge_output_format": "mp4",
             "quiet": True,
             "no_warnings": True,
-            "progress_hooks": [self._progress_hook],
+            "progress_hooks": [_hook],
             "retries": retries,
             "fragment_retries": fragment_retries,
             "socket_timeout": socket_timeout,
@@ -271,8 +306,9 @@ class Downloader:
             opts["proxy"] = proxy
         return opts
 
-    def _download_with_timeout(self, ydl: Any, url: str, total_timeout: float,
-                               started: float = 0.0) -> None:
+    def _download_with_timeout(self, ydl: Any, url: str, deadline: float,
+                               started: float = 0.0,
+                               abort: Optional[threading.Event] = None) -> None:
         """在后台线程里跑 yt-dlp，主线程轮询总超时 / 取消 / **下载速度**。
 
         yt-dlp 是阻塞调用、没有"总时长"上限，卡在一个不响应的 CDN 上就会
@@ -283,9 +319,19 @@ class Downloader:
         实测同一视频不同节点速度能差 6 倍（429KB/s ~ 2722KB/s），抽到慢节点
         时单次下载可能耗时十几分钟。持续低于阈值就抛 _SlowDownload，
         由调用方重新取元信息、换一个节点重来（见 download()）。
-        """
-        import threading
 
+        `deadline` 是**整次下载的绝对截止时刻**（0 表示不限），不是本次尝试的
+        时长——否则每换一个候选取都重新计时，总耗时会远超配置。
+
+        退出时必须让工作线程真正停下来：daemon 线程不会因为主线程 raise 而结束，
+        它会继续下载、写 .part（而调用方正在删这些），还会污染下一轮的采样。
+        所以置 `abort` 让工作线程的 progress_hook 抛 _Aborted 把它顶出去。
+        注意 abort 必须是**本次尝试专属**的 Event（由 download() 创建并传进来），
+        不能共用 self._abort —— 否则下一次尝试 clear() 会把上一个残留线程
+        一起"复活"。
+        """
+        abort = abort if abort is not None else threading.Event()
+        self._abort = abort          # 供观测/测试
         result: Dict[str, Any] = {}
         # 每次尝试都重置采样状态：上一轮的字节数/速度不能带进本轮，
         # 否则 delta 会算出错误的（甚至负的）瞬时速度
@@ -297,21 +343,33 @@ class Downloader:
         def _worker() -> None:
             try:
                 ydl.download([url])
+            except _Aborted:
+                result["aborted"] = True
             except BaseException as e:      # 交给主线程判定
                 result["error"] = e
 
         worker = threading.Thread(target=_worker, daemon=True)
         worker.start()
 
-        while worker.is_alive():
-            worker.join(timeout=1.0)
-            self._cancel.check()
-            if total_timeout > 0 and time.time() - started > total_timeout:
-                raise _DownloadTimeout(
-                    f"下载超过 {total_timeout:.0f} 秒仍未完成，已中止"
-                    f"（可调大 config.yaml → downloader.timeout）"
-                )
-            self._check_slow_node()
+        try:
+            while worker.is_alive():
+                worker.join(timeout=_WATCHDOG_POLL)
+                self._cancel.check()
+                if deadline and time.time() > deadline:
+                    raise _DownloadTimeout(
+                        f"下载超过配置的 downloader.timeout 仍未完成，已中止"
+                        f"（当前值 {self.dl_config.get('timeout', 7200)} 秒，可调大）"
+                    )
+                self._check_slow_node()
+        except BaseException:
+            # 超时 / 慢节点 / 用户取消：先叫停工作线程，再抛出
+            abort.set()
+            worker.join(timeout=_ABORT_JOIN_TIMEOUT)
+            if worker.is_alive():
+                logger.warning(
+                    "yt-dlp 线程仍卡在 socket 读上（无进度回调可打断），"
+                    "已弃用本次尝试，后台自行结束；不影响换节点重试")
+            raise
         if "error" in result:
             raise result["error"]
 
@@ -332,7 +390,7 @@ class Downloader:
 
         now = time.time()
         elapsed = now - self._last_speed_at
-        if elapsed < 1.0:
+        if elapsed < _SPEED_SAMPLE_INTERVAL:
             return
         downloaded = getattr(self, "_downloaded_bytes", 0)
         delta = downloaded - self._last_speed_bytes
@@ -382,7 +440,10 @@ class Downloader:
 
         quality: str = self.dl_config.get("quality", "best")
         # 整次下载的总超时（config: downloader.timeout，默认 2 小时）
+        # 注意：是**整次**的预算，不是每个候选各给一份 —— 否则 6 个候选 × 3 轮
+        # 最坏能拖到几十小时，和"总超时"的语义完全不符。
         total_timeout: float = float(self.dl_config.get("timeout", 0) or 0)
+        deadline = time.time() + total_timeout if total_timeout > 0 else 0.0
         # 抽到慢节点时最多重取几次元信息（每次重取会重新分配 CDN 节点）
         max_rounds = max(1, int(self.dl_config.get("slow_node_retries", 3)))
 
@@ -405,12 +466,15 @@ class Downloader:
                 self._check_cancel()
                 started = time.time()
                 try:
+                    abort = threading.Event()
+                    self._abort = abort       # 供观测/测试
                     opts = self._ytdlp_opts(folder, f"{title}.%(ext)s", format_override=fmt,
-                                            retries_override=per_candidate_retries)
+                                            retries_override=per_candidate_retries,
+                                            abort_event=abort)
                     if len(candidates) > 1:
                         logger.info("尝试格式 %d/%d: %s", idx, len(candidates), fmt)
                     with yt_dlp.YoutubeDL(opts) as ydl:
-                        self._download_with_timeout(ydl, url, total_timeout, started)
+                        self._download_with_timeout(ydl, url, deadline, started, abort)
                     last_error = None
                     break
                 except _DownloadTimeout:
@@ -424,6 +488,11 @@ class Downloader:
                     logger.warning("%s", e)
                     break
                 except Exception as e:
+                    # 总预算用完就不再换候选了
+                    if deadline and time.time() > deadline:
+                        raise _DownloadTimeout(
+                            f"下载超过 {total_timeout:.0f} 秒仍未完成，已中止"
+                            f"（可调大 config.yaml → downloader.timeout）") from e
                     if isinstance(e, (KeyboardInterrupt, SystemExit)):
                         raise
                     last_error = e
@@ -440,7 +509,7 @@ class Downloader:
             # 校验音轨：B站 音视频是分开的两条流，只下到视频流（中断、格式串写错）
             # 时文件看起来"下载成功"，但转写阶段会因没有音轨而失败（用户只看到
             # 一串 ffmpeg 报错）。这里提前发现，删掉残次品重新下一轮。
-            if found and not self._ensure_has_audio(found, folder):
+            if found and not self._ensure_has_audio(found):
                 logger.warning("下载到的文件没有音轨，丢弃后重试...")
                 try:
                     found.unlink()
@@ -470,7 +539,7 @@ class Downloader:
         return video_path, meta
 
     @staticmethod
-    def _ensure_has_audio(video_path: Path, folder: Path) -> bool:
+    def _ensure_has_audio(video_path: Path) -> bool:
         """检查下载产物有没有音轨（纯音频文件直接算通过）"""
         if video_path.suffix.lower() in AUDIO_EXTS:
             return True
@@ -509,14 +578,25 @@ class Downloader:
         ext: str = local.suffix or ".mp4"
         dest: Path = folder / f"{title}{ext}"
 
-        # 已经导入过就直接复用：既避免重复拷贝，也避免 cb,复制时源文件
-        # 恰好被占用（如本文件就是上一次的输出）导致的 WinError 32
+        # 已经导入过就直接复用：既避免重复拷贝，也避免复制时源文件
+        # 恰好被占用（如本文件就是上一次的输出）导致的 WinError 32。
+        # 但**不能只看 dest 存在**：上次复制中断会留下半截文件，或用户替换了
+        # 同名但内容不同的源文件 —— 那样后面会静默转写一份旧/残文件。
+        # 这里用大小 + 修改时间判断是否确实同一份内容。
         if dest.exists():
             if dest.resolve() == local:
                 logger.info("使用已有文件: %s", dest)
                 return dest, {"title": title, "uploader": "本地文件"}
-            logger.info("已导入: %s", title)
-            return dest, {"title": title, "uploader": "本地文件"}
+            try:
+                same = (dest.stat().st_size == local.stat().st_size
+                        and abs(dest.stat().st_mtime - local.stat().st_mtime) < 2)
+            except OSError:
+                same = False
+            if same:
+                logger.info("已导入: %s", title)
+                return dest, {"title": title, "uploader": "本地文件"}
+            logger.warning("目标文件与源文件不一致（可能上次中断或源已更新），重新导入: %s",
+                           dest.name)
 
         logger.info("导入本地文件: %s", local.name)
         try:
@@ -585,10 +665,15 @@ class Downloader:
         folder.mkdir(parents=True, exist_ok=True)
 
         import yt_dlp
+        # 每次下载都用一个全新的 abort Event，并同步到 self._abort：
+        # 否则上一次单视频下载被中止后（self._abort 已置位），这里没有独立的
+        # Event 可重置，会一启动就被判定为"已中止"。
+        abort = threading.Event()
+        self._abort = abort
         opts = self._ytdlp_opts(folder, "%(playlist_index)s-%(title)s.%(ext)s",
-                                no_playlist=False)
+                                no_playlist=False, abort_event=abort)
         with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
+            self._download_with_timeout(ydl, url, 0.0, time.time(), abort)
 
         results: List[Tuple[Path, Dict[str, Any]]] = []
         # 不能只 glob *.mp4：quality=audio 时产物是 m4a/mp3/webm

@@ -70,6 +70,25 @@ class TestImportLocal:
         assert dest == existing
         assert dest.read_bytes() == b"content"
 
+    def test_stale_dest_is_reimported(self, tmp_path):
+        """回归：dest 已存在但内容不同（上次复制中断/源文件已更新）时必须重新复制。
+
+        旧实现只要 dest.exists() 就直接复用，会静默转写一份半截或过期的文件。
+        """
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        src = src_dir / "video.mp4"
+        src.write_bytes(b"new content that is longer")
+        out = tmp_path / "out"
+        folder = out / "video"
+        folder.mkdir(parents=True)
+        stale = folder / "video.mp4"
+        stale.write_bytes(b"old")          # 半截/过期文件
+
+        d = _make_downloader(out)
+        dest, _meta = d._import_local(str(src))
+        assert dest.read_bytes() == b"new content that is longer", "应重新复制而不是复用残件"
+
     def test_missing_file_raises(self, tmp_path):
         d = _make_downloader(tmp_path / "out")
         try:

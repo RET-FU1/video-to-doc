@@ -51,6 +51,8 @@ class Pipeline:
         self._srt: bool = srt
         self._skip_summary: bool = skip_summary
         self._translator: Optional[Any] = None
+        # 最近一次批量处理（文件夹/播放列表）里失败的条目数，供 GUI 汇总显示
+        self.last_failures: int = 0
 
     # ------------------------------------------------------------------
     # 工具
@@ -119,16 +121,29 @@ class Pipeline:
         styles: List[str] = style_val if isinstance(style_val, list) else [style_val]
         styles = [s for s in styles if s] or ["auto"]   # 空列表/空串一律回退 auto
 
-        first_fmt: str = formats[0]
-        done_marker = folder / (
-            f"{stem}.{first_fmt}" if self._skip_summary
-            else f"{STYLE_CN.get(styles[0], styles[0])}-{stem}.{first_fmt}"
-        )
-        if done_marker.exists() and get_state(folder) == "done":
+        # 判断"是否已完成"必须覆盖**本次请求的全部产物**，不能只看第一个
+        # 风格 + 第一个格式：
+        #   上次只跑了 auto/md，这次勾了 auto+expert、md+txt —— 若只看
+        #   auto/md 存在就跳过，expert 和 txt 永远不会生成（实际踩到）。
+        expected: List[Path] = []
+        # 勾了「生成字幕」就必须有对应的 .srt，否则删掉/上次没生成 srt 后
+        # 重跑会因为"文档齐全 + state=done"直接跳过，SRT 永远不会补上。
+        if self._srt:
+            expected.append(folder / f"{stem}.srt")
+        for style in ([""] if self._skip_summary else styles):
+            for fmt in formats:
+                base = f"{stem}" if self._skip_summary else f"{STYLE_CN.get(style, style)}-{stem}"
+                expected.append(folder / f"{base}.{fmt}")
+        missing = [p for p in expected if not p.exists()]
+
+        if not missing and get_state(folder) == "done":
             # 不要删 .pipeline_state：删了 is_done() 会变 False，下一轮又会重来。
             # 保留状态即可让重复运行稳定跳过（删除产物文件才会真正重跑）。
-            logger.info("已完成，跳过（如需重跑请删除 %s）", done_marker.name)
+            logger.info("已完成，跳过（如需重跑请删除该任务目录或 .pipeline_state）")
             return
+        if missing and get_state(folder) == "done":
+            logger.info("已有产物缺 %d 个（%s），继续处理以补齐",
+                        len(missing), "、".join(p.name for p in missing[:3]))
 
         # 1) 转写（或取平台字幕）
         self._check_cancel()
@@ -583,9 +598,15 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def _process_playlist(self, url: str) -> Path:
+        """处理播放列表，返回输出目录。
+
+        失败数通过 `self.last_failures` 上报（GUI 用来显示"完成（N 个失败）"），
+        不能让单个条目失败后仍然只打一句"全部完成" —— 用户会以为产物齐全。
+        """
         logger.info("[播放列表模式]")
         results: List[Tuple[Path, Dict[str, Any]]] = self.downloader.download_playlist(url)
 
+        failed = 0
         for video_path, meta in results:
             self._check_cancel()
             logger.info("--- %s ---", meta.get('title', video_path.stem))
@@ -594,6 +615,7 @@ class Pipeline:
             except CancelledError:
                 raise
             except Exception as e:
+                failed += 1
                 logger.error("[FAIL] %s", e)
                 continue
 
@@ -601,11 +623,15 @@ class Pipeline:
             group_dir: Path = results[0][0].parent.parent
             self._collect_outputs(group_dir)
 
-        logger.info("全部完成! 输出目录: %s", self.output_root)
+        self.last_failures = failed
+        self._log_batch_result(failed, len(results))
         return self.output_root
 
     def process_folder(self, folder_path: str) -> None:
-        """批量处理文件夹内所有视频/音频"""
+        """批量处理文件夹内所有视频/音频
+
+        失败数通过 `self.last_failures` 上报，理由同 `_process_playlist`。
+        """
         folder: Path = Path(folder_path).resolve()
         if not folder.is_dir():
             raise NotADirectoryError(f"路径不存在或不是文件夹: {folder_path}")
@@ -616,17 +642,20 @@ class Pipeline:
         )
         if not files:
             logger.warning("文件夹内未找到视频/音频文件: %s", folder)
+            self.last_failures = 0
             return
 
         group_name: str = sanitize_filename(folder.name)
         logger.info("[文件夹模式] 共发现 %d 个文件 → 输出: %s", len(files), self.output_root / group_name)
 
+        failed = 0
         for i, file_path in enumerate(files):
             self._check_cancel()
             logger.info("--- [%d/%d] %s ---", i + 1, len(files), file_path.stem)
             try:
                 video_path, meta = self.downloader._import_local(str(file_path), output_subdir=group_name)
             except Exception as e:
+                failed += 1
                 logger.error("[FAIL] 导入失败: %s", e)
                 continue
 
@@ -635,11 +664,20 @@ class Pipeline:
             except CancelledError:
                 raise
             except Exception as e:
+                failed += 1
                 logger.error("[FAIL] %s", e)
                 continue
 
         self._collect_outputs(self.output_root / group_name)
-        logger.info("全部完成! 输出目录: %s", self.output_root)
+        self.last_failures = failed
+        self._log_batch_result(failed, len(files))
+
+    def _log_batch_result(self, failed: int, total: int) -> None:
+        """批量结束时如实报告成功/失败数"""
+        if failed:
+            logger.warning("完成，但有 %d/%d 个任务失败（见上方 [FAIL]）", failed, total)
+        else:
+            logger.info("全部完成! 输出目录: %s", self.output_root)
 
     def _collect_outputs(self, group_dir: Path) -> None:
         """将批量处理的所有转写和总结分别收集到汇总文件夹"""

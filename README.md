@@ -18,7 +18,7 @@
 - **AI 总结** — 兼容 OpenAI 接口（支持 DeepSeek、MiMo、智谱、通义千问、月之暗面、Ollama），5 种内置总结风格 + 自定义提示词，可同时多选，忠于原文不编造
 - **多格式输出** — 转写和总结可按需输出 `.md` `.txt` `.html`，HTML 支持暗色模式、TOC 导航
 - **播放列表** — 支持 B站合集/分P、YouTube 播放列表等批量处理
-- **断点续跑** — 同一次运行中断后重跑会跳过已完成的下载/转写；已完成的任务重跑会重新生成文档
+- **断点续跑** — 中断后重跑会跳过已完成的下载/转写；整条流水线已完成的任务会直接跳过（想重跑请删除该任务目录或其中的 `.pipeline_state`）
 - **环境诊断** — `python main.py --check` 一键检查 ffmpeg、模型、API、GPU
 - **跨平台** — Windows / Mac / Linux
 
@@ -190,6 +190,12 @@ output/
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `output_dir` | 输出目录（CLI 可用 `-o` 覆盖） | `./output` |
+| `downloader.quality` | 画质：`best` / `1080p` / `720p` / `audio`（只下音频，最快） | `best` |
+| `downloader.timeout` | 单次下载总超时（秒） | `7200` |
+| `downloader.slow_node_retries` | 抽到慢 CDN 节点时最多重取几次下载地址（`1` = 关闭换节点） | `3` |
+| `downloader.slow_node_min_speed_kb` | 低于此速度视为慢节点（`0` = 关闭慢节点检测） | `300` |
+| `downloader.slow_node_min_bytes_mb` | 已下载不足此大小不做慢节点判定 | `8` |
+| `downloader.slow_node_min_samples` | 连续多少个采样点都慢才判定（约等于秒数） | `5` |
 | `whisper.language` | 转写语言（`auto` 只按前 30 秒判定，中文视频建议写 `zh`；CLI 可用 `--language` 覆盖） | `zh` |
 | `whisper.device` | 推理设备（GPU 不可用时自动回退 CPU；CLI 可用 `--device` 覆盖） | `cuda` |
 | `whisper.compute_type` | 精度 | `float16`（GPU）/ `int8`（CPU） |
