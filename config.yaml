@@ -1,5 +1,5 @@
 downloader:
-  cookies_file: 'cookies.txt'
+  cookies_file: ''
   cookies_from_browser: ''
   format: ''
   fragment_retries: 50
@@ -9,6 +9,13 @@ downloader:
   retries: 30
   socket_timeout: 60
   timeout: 7200
+  # ── 慢节点自动换路 ──
+  # B站 每次取元信息都会随机分配 CDN 节点，实测同一视频不同节点速度能差 6 倍
+  # （429KB/s ~ 2722KB/s）。抽到慢节点时会主动放弃该节点、重新取地址换节点重试。
+  slow_node_retries: 3           # 最多重取几次元信息换节点（1 = 关闭换节点重试）
+  slow_node_min_speed_kb: 300    # 低于此速度视为慢节点（0 = 关闭慢节点检测）
+  slow_node_min_bytes_mb: 8      # 已下载不足此大小不判定（避免误杀小文件/结尾段）
+  slow_node_min_samples: 5       # 连续多少个采样点（约等于秒）都慢才判定
 output_dir: ./output
 subtitles:
   auto_subtitle:
@@ -26,6 +33,7 @@ summarizer:
   base_url: ''
   custom_prompt: ''
   max_chunk_chars: 80000
+  max_retries: 3
   max_tokens: 8192
   model: 'deepseek-flash'
   # 2026-09-13 修复：V4.1 Flash 内测版（expires-on-0910）已于 09-10 到期，
@@ -35,6 +43,8 @@ summarizer:
   output_formats:
   - md
   polish_model: ''
+  polish_max_tokens: 16384
+  polish_timeout: 120
   summary_styles:
   - auto
   # - knowledge_points
@@ -42,12 +52,22 @@ summarizer:
   # - core_ideas
   # - expert
   # - custom
+  timeout: 300
 translation:
   target_lang: zh
 whisper:
+  audio_format: wav
+  beam_size: 5
   compute_type: float16
+  # condition_on_previous_text: false 可消除中文重复环，实测还能快约 10%
+  condition_on_previous_text: false
   device: cuda
+  hallucination_silence_threshold: null
+  # hotwords: 专有名词/专业术语，逗号分隔。只对这些词有效，值得按你的领域填。
+  # 例（摄影类）: '构图法则,三分法,引导线,黄金比例,Adobe Lightroom,Photoshop'
   hotwords: ''
   initial_prompt: ''
-  language: auto
+  # language 用 zh 而不是 auto：auto 只按音频前 30 秒判定语言，中文视频有误判风险。
+  # 处理英文/外文视频时改为 en / ja 等，或用 auto 让模型自己判断。
+  language: zh
   vad_enabled: true

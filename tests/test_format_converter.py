@@ -4,7 +4,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from format_converter import md_to_txt, md_to_html, _kebab_id, _count_reading_minutes, _extract_subtitle
+from format_converter import (md_to_txt, md_to_html, save_formats, _kebab_id,
+                             _count_reading_minutes, _extract_subtitle)
 
 
 class TestKebabId:
@@ -106,3 +107,54 @@ class TestMdToHtml:
     def test_has_body_content(self):
         html = md_to_html("# T\n\nhello world", title="T")
         assert "hello world" in html
+
+
+class TestSaveFormats:
+    """save_formats 文件名规则：base_path 前缀原样保留，只追加扩展名。
+
+    历史 bug：Path.with_suffix 把最后一个点之后的内容当扩展名，
+    `EP1.5 讲解` 和 `EP1.6 讲解` 都写成 `EP1.md` → 后一个视频覆盖前一个。
+    """
+
+    def test_dotted_titles_do_not_overwrite(self, tmp_path):
+        base1 = tmp_path / "EP1.5 讲解"
+        base2 = tmp_path / "EP1.6 讲解"
+        saved1 = save_formats("# 视频1\n\n内容一", base1, ["md"])
+        saved2 = save_formats("# 视频2\n\n内容二", base2, ["md"])
+
+        assert [p.name for p in saved1] == ["EP1.5 讲解.md"]
+        assert [p.name for p in saved2] == ["EP1.6 讲解.md"]
+        assert saved1[0] != saved2[0]
+        # 两个文件都存在且各自内容独立，没有互相覆盖
+        assert "内容一" in saved1[0].read_text(encoding="utf-8")
+        assert "内容二" in saved2[0].read_text(encoding="utf-8")
+
+    def test_date_like_title(self, tmp_path):
+        saved = save_formats("# t\n\nx", tmp_path / "2026.10 更新说明", ["md", "txt"])
+        assert [p.name for p in saved] == ["2026.10 更新说明.md", "2026.10 更新说明.txt"]
+        assert all(p.exists() for p in saved)
+
+    def test_all_three_formats(self, tmp_path):
+        base = tmp_path / "EP2.3 摄影构图"
+        saved = save_formats("# t\n\n**加粗**内容", base, ["md", "txt", "html"])
+        names = sorted(p.name for p in saved)
+        assert names == ["EP2.3 摄影构图.html", "EP2.3 摄影构图.md", "EP2.3 摄影构图.txt"]
+        for path in saved:
+            assert path.exists()
+            assert path.stat().st_size > 0
+        # html 真的是 html，txt 去掉了 markdown 标记
+        html_path = next(p for p in saved if p.suffix == ".html")
+        txt_path = next(p for p in saved if p.suffix == ".txt")
+        assert "<html" in html_path.read_text(encoding="utf-8").lower()
+        assert "**" not in txt_path.read_text(encoding="utf-8")
+
+    def test_no_extension_base(self, tmp_path):
+        """base_path 完全没有扩展名时行为不变"""
+        saved = save_formats("# t\n\nx", tmp_path / "plain_title", ["md"])
+        assert saved[0].name == "plain_title.md"
+
+    def test_returns_paths_and_meta_source(self, tmp_path):
+        saved = save_formats("# t\n\nx", tmp_path / "a.b.c", ["md"],
+                             meta={"source_file": "video.mp4"})
+        assert saved[0].name == "a.b.c.md"
+        assert isinstance(saved[0], Path)

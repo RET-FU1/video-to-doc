@@ -6,10 +6,40 @@ import os
 import re
 import shutil
 import sys
+import threading
 from pathlib import Path
 from typing import List
 
 PROJECT_ROOT: Path = Path(__file__).parent
+
+
+# ---- 取消机制 ----
+
+class CancelledError(Exception):
+    """用户主动取消（GUI 停止按钮 / Ctrl+C 封装）"""
+
+
+class CancelToken:
+    """线程安全的取消标记。
+
+    用对象而不是 bool，是为了让后台线程能主动 check() 而不是被动等一个
+    每轮才读一次的标志位；GUI 关掉窗口后 worker 也能在下一个阶段边界退出。
+    """
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+    def check(self) -> None:
+        """已取消则抛出 CancelledError，用于各阶段边界"""
+        if self._event.is_set():
+            raise CancelledError("任务已取消")
 
 
 # ---- 日志 ----
@@ -73,6 +103,16 @@ def find_venv_executable(name: str) -> str:
     if found:
         return found
     raise FileNotFoundError(f"未找到 {name}，请先运行 python setup.py")
+
+
+def python_module_cmd(module: str) -> List[str]:
+    """返回用当前解释器调用模块的命令行。
+
+    venv 里的 .exe 启动器内嵌的是创建时的绝对路径，项目目录renamed/移动后会
+    全部失效（returncode=1、无输出）。用 `python -m <module>` 永远能跑，
+    所以所有外部工具调用统一走这里，不要直接调 venv\\Scripts\\*.exe。
+    """
+    return [sys.executable, "-m", module]
 
 
 # ---- CUDA / GPU 检测 ----
@@ -251,6 +291,12 @@ def load_env() -> None:
 
 # ---- 配置校验 ----
 
+# 与 summarizer.API_PROVIDERS 保持一致
+_API_PROVIDERS: tuple = ("deepseek", "zhipu", "tongyi", "moonshot", "ollama", "mimo")
+# 历史遗留的 provider 名称 → 视为等价于"使用预设"
+_LEGACY_PROVIDERS: tuple = ("openai",)
+
+
 def validate_config(config: dict) -> List[str]:
     """校验配置文件的必填项和类型，返回错误消息列表"""
     errors: List[str] = []
@@ -260,6 +306,8 @@ def validate_config(config: dict) -> List[str]:
 
     if "output_dir" not in config:
         errors.append("config.yaml 缺少必填项 output_dir")
+    elif not isinstance(config["output_dir"], str) or not config["output_dir"].strip():
+        errors.append("output_dir 应为非空字符串路径")
 
     whisper = config.get("whisper", {})
     if not isinstance(whisper, dict):
@@ -271,6 +319,12 @@ def validate_config(config: dict) -> List[str]:
         compute = whisper.get("compute_type", "int8")
         if compute not in ("float16", "int8", "float32"):
             errors.append(f"whisper.compute_type 无效值 '{compute}'")
+        audio_format = whisper.get("audio_format", "wav")
+        if audio_format not in ("wav", "mp3"):
+            errors.append(f"whisper.audio_format 无效值 '{audio_format}'，可选: wav, mp3")
+        beam = whisper.get("beam_size", 5)
+        if not isinstance(beam, int) or not 1 <= beam <= 10:
+            errors.append(f"whisper.beam_size 值无效 '{beam}'，应为 1-10 的整数")
 
     summarizer = config.get("summarizer", {})
     if not isinstance(summarizer, dict):
@@ -278,21 +332,43 @@ def validate_config(config: dict) -> List[str]:
     else:
         # 优先校验 api_provider，兼容旧字段 provider
         api_provider = summarizer.get("api_provider", "") or summarizer.get("provider", "")
-        valid_providers = ("deepseek", "zhipu", "tongyi", "moonshot", "ollama", "mimo")
-        if api_provider and api_provider not in valid_providers:
-            errors.append(f"summarizer.api_provider 未知值 '{api_provider}'，可选: {', '.join(valid_providers)}")
-        # model 可选：使用预设 (deepseek 等) 时自动填充，自定义时才需手动指定
+        if api_provider and api_provider not in _API_PROVIDERS + _LEGACY_PROVIDERS:
+            errors.append(
+                f"summarizer.api_provider 未知值 '{api_provider}'，"
+                f"可选: {', '.join(_API_PROVIDERS)}"
+            )
+        # model 可选：用预设时自动填充；仅当既无预设又无自定义 model 时才算缺
+        if not summarizer.get("model") and api_provider in ("",) + _LEGACY_PROVIDERS:
+            errors.append("summarizer.model 未设置：使用自定义接口时必须填写模型名")
         max_chunk = summarizer.get("max_chunk_chars", 80000)
         if not isinstance(max_chunk, (int, float)) or max_chunk < 1000:
-            errors.append(f"summarizer.max_chunk_chars 值无效，应为 >= 1000 的整数")
+            errors.append("summarizer.max_chunk_chars 值无效，应为 >= 1000 的整数")
         max_tok = summarizer.get("max_tokens", 4096)
         if not isinstance(max_tok, (int, float)) or max_tok < 256:
-            errors.append(f"summarizer.max_tokens 值无效，应为 >= 256 的整数")
+            errors.append("summarizer.max_tokens 值无效，应为 >= 256 的整数")
 
     dl = config.get("downloader", {})
     if isinstance(dl, dict):
         timeout = dl.get("timeout", 7200)
         if not isinstance(timeout, (int, float)) or timeout < 10:
-            errors.append(f"downloader.timeout 值无效，应为 >= 10 的整数")
+            errors.append("downloader.timeout 值无效，应为 >= 10 的整数")
 
     return errors
+
+# ---- 数值格式化 ----
+
+def fmt_size(num: float, *, space: bool = False) -> str:
+    """字节数 → 人类可读字符串。
+
+    downloader 用于下载进度日志（紧凑格式 ``12.3MB``），
+    GUI 文件列表用 space=True（``12.3 MB``，表格里更易读）。
+    """
+    if not num or num < 0:
+        return "?" if not space else ""
+    for unit in ("B", "KB", "MB", "GB"):
+        if num < 1024 or unit == "GB":
+            if unit == "B":
+                return f"{int(num)} B" if space else f"{int(num)}B"
+            return f"{num:.1f} {unit}" if space else f"{num:.1f}{unit}"
+        num /= 1024
+    return f"{num:.1f}GB"

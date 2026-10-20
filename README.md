@@ -2,6 +2,8 @@
 
 一键将网络视频（B站、YouTube 等）或本地视频/音频文件转写为文字文档，并用 AI 自动生成内容总结。
 
+![界面截图](docs/screenshot-gui.png)
+
 ## 功能
 
 - **图形界面** — `python gui.py` 启动，粘贴链接即可，支持实时彩色日志、随时停止
@@ -13,10 +15,10 @@
 - **多说话人识别** — 抛光时由 LLM 根据对话上下文自动识别不同说话人并标注，无需额外依赖
 - **翻译** — 外文视频翻译为目标语言，生成汉化文档
 - **字幕生成** — 生成 SRT 字幕文件，可配合翻译生成目标语言字幕
-- **AI 总结** — 兼容 OpenAI 接口（支持 DeepSeek、MiMo、智谱、通义千问、月之暗面、Ollama），6 种总结风格可同时多选（含自定义提示词），忠于原文不编造
+- **AI 总结** — 兼容 OpenAI 接口（支持 DeepSeek、MiMo、智谱、通义千问、月之暗面、Ollama），5 种内置总结风格 + 自定义提示词，可同时多选，忠于原文不编造
 - **多格式输出** — 转写和总结可按需输出 `.md` `.txt` `.html`，HTML 支持暗色模式、TOC 导航
 - **播放列表** — 支持 B站合集/分P、YouTube 播放列表等批量处理
-- **断点续跑** — 中断后重新运行自动跳过已完成步骤
+- **断点续跑** — 同一次运行中断后重跑会跳过已完成的下载/转写；已完成的任务重跑会重新生成文档
 - **环境诊断** — `python main.py --check` 一键检查 ffmpeg、模型、API、GPU
 - **跨平台** — Windows / Mac / Linux
 
@@ -50,6 +52,13 @@ python setup.py
 ```
 
 首次运行会下载 Whisper 模型（约 1.6GB），仅此一次。之后 `python main.py` 和 `python gui.py` 会自动使用项目虚拟环境，无需手动激活。
+
+需要跑单元测试时，额外安装开发依赖：
+
+```bash
+venv/Scripts/pip install -r requirements-dev.txt
+venv/Scripts/python -m pytest tests -q
+```
 
 ### 3. 配置 API Key
 
@@ -133,7 +142,8 @@ output/
     └── 专家深度-{标题}.md
 ```
 
-中间文件（`.txt`、`_segments.json`、`_subtitle.srt`、`_subtitle.vtt`、`_subtitle_info.json`、`_zh.txt`）在任务完成后自动清理。
+中间文件（`.txt`、`_subtitle.srt`、`_subtitle.vtt`、`_subtitle_info.json`、`_zh.txt`）在任务完成后自动清理；
+`_segments.json` 会**保留**——它是重跑字幕、低置信质检和免重转的凭据（删掉它才会触发重新转写）。
 
 **播放列表 / 文件夹批量处理：**
 
@@ -151,7 +161,7 @@ output/
 
 ## 总结风格
 
-一共 6 种风格，可以**同时多选**，每种风格生成一个独立的总结文件。
+一共 5 种内置风格 + 自定义，可以**同时多选**，每种风格生成一个独立的总结文件。
 
 | 风格 | 参数 | 说明 |
 |------|------|------|
@@ -160,7 +170,7 @@ output/
 | 操作步骤 | `steps` | 按顺序拆解步骤：做什么、为什么必要、怎么做、常见坑点 |
 | 核心观点 | `core_ideas` | 洞察提炼：拒绝话题罗列，每条都是让人「原来如此」的观点 |
 | 专家深度 | `expert` | 世界级专家视角，自我核查事实，锐利批判思维 |
-| 自定义 | `custom` | 在 `config.yaml` 的 `custom_prompt` 中编写自己的提示词 |
+| 自定义 | `custom` | 不走内置提示词，改用 `summarizer.custom_prompt` 中的内容 |
 
 在 GUI 中勾选"自定义"时会显示提示词输入框，可直接在界面中编写。
 
@@ -180,20 +190,26 @@ output/
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `output_dir` | 输出目录（CLI 可用 `-o` 覆盖） | `./output` |
-| `whisper.language` | 转写语言 | `auto` |
-| `whisper.device` | 推理设备 | `cuda` |
+| `whisper.language` | 转写语言（`auto` 只按前 30 秒判定，中文视频建议写 `zh`；CLI 可用 `--language` 覆盖） | `zh` |
+| `whisper.device` | 推理设备（GPU 不可用时自动回退 CPU；CLI 可用 `--device` 覆盖） | `cuda` |
 | `whisper.compute_type` | 精度 | `float16`（GPU）/ `int8`（CPU） |
 | `whisper.vad_enabled` | VAD 语音检测，自动跳过静音 | `true` |
+| `whisper.beam_size` | 束搜索宽度，越大越准越慢 | `5` |
+| `whisper.condition_on_previous_text` | 是否用上一段结果作为上下文。中文长音频设为 `false` 可消除重复环 | `false` |
+| `whisper.audio_format` | 从视频提取的中间音频格式 | `wav` |
+| `whisper.hallucination_silence_threshold` | 静音段幻觉过滤阈值（秒），`null` 表示关闭 | `null` |
 | `whisper.initial_prompt` | 初始提示词，帮助识别专业术语 | 空 |
-| `whisper.hotwords` | 热词增强，逗号分隔 | 空 |
+| `whisper.hotwords` | 热词增强，逗号分隔的专有名词（CLI 可用 `--hotwords` 覆盖） | 空 |
 | `summarizer.api_provider` | API 服务商 | `deepseek` |
 | `summarizer.base_url` | 自定义 API 地址（留空用预设） | 空 |
 | `summarizer.model` | 自定义模型（留空用预设） | 空 |
 | `summarizer.polish_model` | 标点分段专用模型（留空复用 model） | 空 |
 | `summarizer.max_chunk_chars` | 长文本分段阈值 | `80000` |
-| `summarizer.max_tokens` | 单次回复最大 token | `4096` |
+| `summarizer.max_tokens` | 单次回复最大 token（含推理模型的思考预算） | `8192` |
 | `summarizer.timeout` | API 超时（秒） | `300` |
 | `summarizer.max_retries` | API 失败重试次数 | `3` |
+| `summarizer.polish_max_tokens` | 标点分段单次回复最大 token | `16384` |
+| `summarizer.polish_timeout` | 标点分段 API 超时（秒） | `120` |
 | `summarizer.summary_styles` | 总结风格列表（可多选） | `[auto]` |
 | `summarizer.custom_prompt` | 自定义总结提示词 | 空 |
 | `summarizer.multi_speaker` | 多说话人识别 | `false` |
@@ -206,7 +222,7 @@ output/
 | `subtitles.auto_subtitle.max_noise_ratio` | 自动字幕最大噪音占比 | `0.10` |
 | `downloader.quality` | 视频清晰度预设 | `best` |
 | `downloader.format` | 高级自定义 yt-dlp 格式串（留空用 quality） | 空 |
-| `downloader.cookies_file` | Cookie 文件路径（B站需登录） | 空 |
+| `downloader.cookies_file` | Cookie 文件路径（B站需登录时填，如 `cookies.txt`） | 空 |
 | `downloader.cookies_from_browser` | 直接从浏览器读取 Cookie：chrome/firefox/edge | 空 |
 | `downloader.proxy` | 代理地址 | 空 |
 | `downloader.timeout` | 下载超时（秒） | `7200` |
@@ -257,13 +273,27 @@ A: 标点由 LLM 自动添加。可在 `config.yaml` 中设置 `summarizer.polis
 A: 多说话人识别由 LLM 根据对话上下文判断，不依赖声学特征。对问答式对话效果好，对多人同时说话或简短交替效果有限。可在 GUI 中随时开关。
 
 **Q: 如何提高专业术语的识别准确率？**
-A: 在 `config.yaml` 的 `whisper.initial_prompt` 中描述音频主题（如"关于深度学习的讲座"），或设置 `whisper.hotwords` 列出专有名词（如"DeepSeek,PyTorch,CTranslate2"）。
+A: 在 `config.yaml` 的 `whisper.initial_prompt` 中描述音频主题（如"关于深度学习的讲座"），或设置 `whisper.hotwords` 列出专有名词（如"DeepSeek,PyTorch,CTranslate2"）。也可以用命令行临时覆盖：`--language zh --hotwords "构图法则,三分法"`。
 
 **Q: 转写速度能优化吗？**
 A: VAD 语音检测默认开启，可自动跳过静音段提速 20-40%。如不需要可设置 `whisper.vad_enabled: false`。
 
 **Q: 视频的章节标记会保留吗？**
 A: 会。YouTube/B站视频的章节会自动提取并注入到转写文档中作为 `## 章节标题` 分段标记。
+
+## 已知限制
+
+以下几点是当前实现的上限，不是 bug，使用前请知悉：
+
+1. **ASR 会出现同音错字** — 人名、品牌、专有名词尤其容易错（例如把「阿喀琉斯之踵」听成别的词）。
+   `whisper.hotwords` 与 `whisper.initial_prompt` 能显著缓解，但**无法根治**；
+   `whisper.language` 建议显式写 `zh` 而不是 `auto`（`auto` 只按前 30 秒判定语言）。
+2. **标点与分段由 LLM 完成** — 长视频会被分块处理，极少数情况下分块边界处的语句衔接可能不连贯。
+   代码里有保真守卫：一旦抛光结果的长度或相似度异常，会自动回退原文并打 `WARNING`。
+3. **`--translate` 依赖 LLM 逐行对齐** — 若翻译输出的行数与原文不一致，会**跳过翻译**而不是让字幕错位，
+   日志中会给出 `翻译行数不匹配` 的 WARNING。
+4. **视频原文件不会被自动删除** — 下载的 `.mp4` 会一直留在 `output/` 下，需要手动清理 `output/`；
+   只有 `.txt`、`_subtitle.*`、`_zh.txt` 这类可再生的中间文件会在任务完成后自动清理（`_segments.json` 保留，供重跑字幕与质检使用）。
 
 ## 技术栈
 
@@ -273,6 +303,7 @@ A: 会。YouTube/B站视频的章节会自动提取并注入到转写文档中�
 - OpenAI 兼容 API — LLM 标点分段 + 多说话人识别 + AI 总结
 - [mistune](https://github.com/lepture/mistune) — Markdown → HTML 渲染
 - tkinter — 图形界面（Python 内置）
+- [pytest](https://docs.pytest.org/) — 单元测试（开发依赖，见 `requirements-dev.txt`）
 
 ## 许可
 

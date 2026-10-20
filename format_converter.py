@@ -164,26 +164,39 @@ def md_to_html(md_text, title=None, source_file=None, date=None):
     return html
 
 
+def _output_path(base_path: Path, fmt: str) -> Path:
+    """base_path 前缀原样保留，只追加 .<fmt> 扩展名。
+
+    不能用 Path.with_suffix：它把最后一个点之后的内容当成扩展名，
+    `EP1.5 讲解` → `EP1.md`、`EP1.6 讲解` → `EP1.md`（后一个覆盖前一个）。
+    pipeline 里的完成标记 `f"{stem}.{first_fmt}"` 也是字符串拼接，
+    两者必须一致，否则续跑会永远认为没完成。
+    """
+    base_path = Path(base_path)
+    return base_path.parent / (base_path.name + "." + fmt)
+
+
 def save_formats(md_text, base_path, formats, meta=None):
     """根据选中的格式保存文件，返回保存的文件路径列表"""
     if meta is None:
         meta = {}
+    base_path = Path(base_path)
     saved = []
     title = meta.get("title", "")
     source_file = meta.get("source_file", base_path.name)
 
     for fmt in formats:
         if fmt == "md":
-            path = base_path.with_suffix(".md")
+            path = _output_path(base_path, "md")
             path.write_text(md_text, encoding="utf-8")
             saved.append(path)
         elif fmt == "html":
-            path = base_path.with_suffix(".html")
+            path = _output_path(base_path, "html")
             converted = md_to_html(md_text, title=title, source_file=source_file)
             path.write_text(converted, encoding="utf-8")
             saved.append(path)
         elif fmt == "txt":
-            path = base_path.with_suffix(".txt")
+            path = _output_path(base_path, "txt")
             converted = md_to_txt(md_text)
             path.write_text(converted, encoding="utf-8")
             saved.append(path)

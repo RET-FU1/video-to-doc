@@ -10,3 +10,25 @@ Thumbs.db
 cookies.txt
 .understand-anything/
 .workbuddy/
+
+# ---- 开发/测试临时产物 ----
+_review/
+.fix_contract.md
+*_lowconf.json
+.pytest_scratch/
+pytest-cache-files-*/
+.pytest_cache/
+.acl_recovery/
+_tmp_verify/
+.tmp_t2/
+_t1_tmp/
+_t3_tmp_*
+.pytest_tmp/
+
+# Python 临时文件（tests 里 tempfile 偶尔会在项目根留下空文件）
+tmp????????*
+
+# 截图/录屏临时文件（正式截图放在 docs/）
+/*.png
+/*.bmp
+/*.gif

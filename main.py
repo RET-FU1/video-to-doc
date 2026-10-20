@@ -5,10 +5,13 @@ Video-to-Doc — 视频下载、转写、总结一体化工具
   python main.py <视频URL>                        单视频/音频
   python main.py <本地文件路径>                    本地视频/音频文件
   python main.py <视频URL> --playlist              播放列表/合集
-  python main.py <视频URL> --summary-style steps   指定总结风格
+  python main.py <视频URL> --summary-styles steps  指定总结风格
   python main.py <视频URL> --multi-speaker         多说话人识别
   python main.py <视频URL> --translate             翻译转写
   python main.py <视频URL> --srt                   生成 SRT 字幕文件
+  python main.py <视频URL> --language zh           覆盖 whisper.language
+  python main.py <视频URL> --hotwords "构图法则,三分法"  覆盖 whisper.hotwords
+  python main.py <视频URL> --device cpu            覆盖 whisper.device
   python main.py --folder <文件夹路径>             批量处理文件夹内所有视频/音频
 
 总结风格:
@@ -37,7 +40,7 @@ from typing import Dict, Any
 
 import yaml
 from pipeline import Pipeline
-from utils import setup_logging, validate_config
+from utils import CancelledError, setup_logging, validate_config
 
 logger = logging.getLogger(__name__)
 
@@ -199,13 +202,12 @@ def main() -> None:
   python main.py C:/videos/myvideo.mp4
   python main.py https://example.com/video --multi-speaker
   python main.py https://example.com/video --translate --srt
-  python main.py https://example.com/video --summary-style custom
+  python main.py https://example.com/video --summary-styles custom
         """,
     )
     parser.add_argument("url", nargs="?", help="视频 URL 或本地文件路径（--folder 模式下可省略）")
     parser.add_argument("--playlist", action="store_true", help="以播放列表模式下载")
     parser.add_argument("--folder", default=None, help="批量处理文件夹内所有视频")
-    parser.add_argument("--skip-download", action="store_true", help="跳过下载（已有视频文件）")
     parser.add_argument("--download-only", action="store_true", help="仅下载视频，不做转写和总结")
     parser.add_argument("--summary-styles", default="auto",
                         help="总结风格，逗号分隔: auto,knowledge_points,steps,core_ideas,expert,custom (默认: auto)")
@@ -219,6 +221,12 @@ def main() -> None:
                         help="生成 SRT 字幕文件（可配合 --translate 生成中文字幕）")
     parser.add_argument("--skip-summary", action="store_true",
                         help="跳过 AI 总结步骤")
+    parser.add_argument("--language", default=None,
+                        help="覆盖 config.yaml 的 whisper.language（如 zh / en / auto）")
+    parser.add_argument("--hotwords", default=None,
+                        help="覆盖 config.yaml 的 whisper.hotwords，逗号分隔的专有名词")
+    parser.add_argument("--device", default=None, choices=["cpu", "cuda"],
+                        help="覆盖 config.yaml 的 whisper.device")
     parser.add_argument("-o", "--output-dir", default=None,
                         help="输出目录（覆盖 config.yaml 中的 output_dir）")
     parser.add_argument("--check", action="store_true",
@@ -227,6 +235,16 @@ def main() -> None:
     args = parser.parse_args()
 
     config: Dict[str, Any] = load_config()
+
+    # 命令行覆盖（写入 config 后再构造 Pipeline，保证优先级最高）
+    whisper_cfg = config.setdefault("whisper", {})
+    if args.language is not None and args.language.strip():
+        whisper_cfg["language"] = args.language.strip()
+    if args.hotwords is not None:
+        # 允许 --hotwords "" 显式清空热词
+        whisper_cfg["hotwords"] = args.hotwords.strip()
+    if args.device is not None:
+        whisper_cfg["device"] = args.device
 
     # 配置校验
     errors = validate_config(config)
@@ -250,10 +268,12 @@ def main() -> None:
         run_check(config)
         return
 
-    pipeline: Pipeline = Pipeline(config, translate=args.translate,
-                                   srt=args.srt, skip_summary=args.skip_summary)
-
     try:
+        # Pipeline(...) 放在 try 里：缺 API_KEY 时 create_summarizer 抛 ValueError，
+        # 否则会直接冒泡成未捕获异常 + traceback
+        pipeline: Pipeline = Pipeline(config, translate=args.translate,
+                                      srt=args.srt, skip_summary=args.skip_summary)
+
         if args.download_only:
             if args.folder:
                 logger.error("[仅下载] 暂不支持文件夹模式，请逐个下载")
@@ -265,8 +285,12 @@ def main() -> None:
             pipeline.process(args.url, is_playlist=args.playlist)
         else:
             parser.error("必须提供 URL 或 --folder 参数")
+    except CancelledError:
+        # 用户主动取消不算错误：已产生的产物都已落盘
+        logger.info("已停止，进度已保存")
+        sys.exit(0)
     except KeyboardInterrupt:
-        logger.info("用户中断。断点续跑机制已保留进度，再次运行可继续。")
+        logger.info("用户中断。已下载/已转写的内容会保留，再次运行可跳过已完成步骤。")
         sys.exit(0)
     except Exception as e:
         logger.error("%s", e)
