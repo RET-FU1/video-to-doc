@@ -97,7 +97,7 @@ def run_check(config: Dict[str, Any]) -> None:
     if not model_dirs:
         model_dirs = list(models_dir.glob("models--*"))
     if model_dirs:
-        bin_files = list(model_dirs[0].glob("*.bin"))
+        bin_files = list(model_dirs[0].rglob("*.bin"))   # HF 缓存结构是 snapshots/<hash>/*.bin，要递归
         if bin_files:
             size_gb = sum(f.stat().st_size for f in bin_files) / (1024 ** 3)
             ok(f"Whisper 模型已下载 ({size_gb:.1f} GB)")

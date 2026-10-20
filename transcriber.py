@@ -156,12 +156,20 @@ class Transcriber:
         # 只要 _segments.json 还在就直接复用：它比 .txt 更完整（含时间戳和置信度），
         # .txt 只是派生产物。历史 bug：换总结风格/换输出格式重跑时，pipeline 会删掉
         # .txt，而旧逻辑要求"txt + segments 都在"才短路，于是 40 分钟视频被整段重转。
-        if segments_path.exists():
+        # 但损坏/半截的 JSON 不能盲目复用（会抛 JSONDecodeError 且永远不重转），
+        # 所以先校验它是合法的段落列表，不合法就删掉重转。
+        if segments_path.exists() and self._segments_usable(segments_path):
             logger.info("已转写: %s", safe_name)
             if not transcript_path.exists():
                 self._write_transcript_from_segments(segments_path, transcript_path, safe_name)
             set_state(output_folder, "transcribed")
             return transcript_path
+        if segments_path.exists():
+            logger.warning("段落文件损坏或格式不对，已删除并重新转写: %s", segments_path.name)
+            try:
+                segments_path.unlink()
+            except OSError as e:
+                logger.warning("删除损坏的段落文件失败: %s", e)
 
         if transcript_path.exists():
             logger.warning("发现转写文本但缺少段落时间戳(%s)，重新转写",
@@ -313,6 +321,22 @@ class Transcriber:
             if text:
                 lines.append(text)
         return "\n".join(lines)
+
+    @staticmethod
+    def _segments_usable(segments_path: Path) -> bool:
+        """检查 `_segments.json` 是否是合法的段落列表。
+
+        上次中断/磁盘写满会留下半截 JSON；旧逻辑只要文件存在就复用，
+        随后在重建 .txt 时抛 JSONDecodeError，而且永远卡在"文件存在"这条路上
+        不会重转。这里做一次廉价校验，不合法就交给调用方删掉重来。
+        """
+        try:
+            data = json.loads(segments_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return False
+        if not isinstance(data, list) or not data:
+            return False
+        return all(isinstance(seg, dict) and "text" in seg for seg in data)
 
     @staticmethod
     def _write_transcript_from_segments(segments_path: Path, transcript_path: Path,

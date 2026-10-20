@@ -27,6 +27,15 @@ _WATCHDOG_POLL = 0.25
 _ABORT_JOIN_TIMEOUT = 3.0
 
 
+def _num(value: Any, default: float) -> float:
+    """配置取值：只有 YAML 里的 null（None）才回退默认值。
+
+    不能简单写 ``cfg.get(k) or default`` —— ``0`` 是本项目有意义的配置
+    （如 slow_node_min_speed_kb=0 表示关闭慢节点检测），会被 ``or`` 吞掉。
+    """
+    return default if value is None else value
+
+
 class _YdlLogger:
     """yt-dlp 日志适配器：把 yt-dlp 的输出收进本项目 logger
 
@@ -253,12 +262,12 @@ class Downloader:
         progress_hook 检查它并抛 _Aborted。绝不能共用一个实例 ——
         否则下一轮 clear() 会让上一轮残留的线程"复活"。
         """
-        retries: int = int(self.dl_config.get("retries", 10))
-        fragment_retries: int = int(self.dl_config.get("fragment_retries", 30))
+        retries: int = int(self.dl_config.get("retries") or 10)
+        fragment_retries: int = int(self.dl_config.get("fragment_retries") or 30)
         if retries_override is not None:
             retries = retries_override
             fragment_retries = min(fragment_retries, retries_override)
-        socket_timeout: int = int(self.dl_config.get("socket_timeout", 30))
+        socket_timeout: int = int(self.dl_config.get("socket_timeout") or 30)
         # 清晰度：优先使用自定义 format，否则从 quality 预设映射
         fmt = format_override or self.dl_config.get("format", "")
         if not fmt:
@@ -294,11 +303,11 @@ class Downloader:
     def _auth_opts(self) -> Dict[str, Any]:
         """cookies / proxy 公共选项（进程内 API 与 subprocess 兜底共用）"""
         opts: Dict[str, Any] = {}
-        cookies: str = self.dl_config.get("cookies_file", "")
+        cookies: str = self.dl_config.get("cookies_file") or ""
         if cookies and Path(cookies).exists():
             opts["cookiefile"] = cookies
         # 直接从浏览器读取 Cookie（无需手动导出文件）
-        browser: str = self.dl_config.get("cookies_from_browser", "").strip()
+        browser: str = (self.dl_config.get("cookies_from_browser") or "").strip()
         if browser:
             opts["cookiesfrombrowser"] = (browser,)
         proxy: str = self.dl_config.get("proxy", "")
@@ -382,9 +391,9 @@ class Downloader:
           低于阈值才放弃
         """
         cfg = self.dl_config
-        min_speed = float(cfg.get("slow_node_min_speed_kb", 300)) * 1024
-        min_bytes = float(cfg.get("slow_node_min_bytes_mb", 8)) * 1024 * 1024
-        min_samples = max(1, int(cfg.get("slow_node_min_samples", 5)))
+        min_speed = float(_num(cfg.get("slow_node_min_speed_kb"), 300)) * 1024
+        min_bytes = float(_num(cfg.get("slow_node_min_bytes_mb"), 8)) * 1024 * 1024
+        min_samples = max(1, int(_num(cfg.get("slow_node_min_samples"), 5)))
         if min_speed <= 0:
             return                                  # 0 = 关闭该检测
 
@@ -445,7 +454,7 @@ class Downloader:
         total_timeout: float = float(self.dl_config.get("timeout", 0) or 0)
         deadline = time.time() + total_timeout if total_timeout > 0 else 0.0
         # 抽到慢节点时最多重取几次元信息（每次重取会重新分配 CDN 节点）
-        max_rounds = max(1, int(self.dl_config.get("slow_node_retries", 3)))
+        max_rounds = max(1, int(_num(self.dl_config.get("slow_node_retries"), 3)))
 
         import yt_dlp
         last_error: Optional[Exception] = None
@@ -729,10 +738,10 @@ class Downloader:
     def _meta_from_subprocess(self, url: str) -> Dict[str, Any]:
         """subprocess 兜底路径（`python -m yt_dlp --dump-json`）"""
         base_args = [*self._ytdlp_cmd(), "--dump-json", "--no-playlist"]
-        cookies: str = self.dl_config.get("cookies_file", "")
+        cookies: str = self.dl_config.get("cookies_file") or ""
         if cookies and Path(cookies).exists():
             base_args.extend(["--cookies", cookies])
-        browser: str = self.dl_config.get("cookies_from_browser", "").strip()
+        browser: str = (self.dl_config.get("cookies_from_browser") or "").strip()
         if browser:
             base_args.extend(["--cookies-from-browser", browser])
         proxy: str = self.dl_config.get("proxy", "")

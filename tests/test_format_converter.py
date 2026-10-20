@@ -158,3 +158,22 @@ class TestSaveFormats:
                              meta={"source_file": "video.mp4"})
         assert saved[0].name == "a.b.c.md"
         assert isinstance(saved[0], Path)
+
+
+class TestHtmlEscaping:
+    """安全回归：yt-dlp 取到的视频标题/来源属于不可信外部输入，
+    原样插进 HTML 时含 <script> 会在本地打开时执行。"""
+
+    def test_title_is_escaped(self):
+        html = md_to_html("# 正文\n", title="<script>alert(1)</script>")
+        assert "<script>alert(1)</script>" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_source_file_is_escaped(self):
+        html = md_to_html("# 正文\n", source_file='a"><img src=x onerror=alert(1)>.mp4')
+        assert "<img src=x onerror" not in html
+
+    def test_toc_entries_escaped(self):
+        md = "# 主标题\n\n## <img src=x onerror=alert(1)>\n\n正文\n"
+        html = md_to_html(md)
+        assert "<img src=x onerror" not in html

@@ -199,3 +199,31 @@ class TestAbortStopsWorker:
             raise AssertionError("应当抛出取消异常")
 
         assert stopped.wait(5), "取消后工作线程没有停下来"
+
+
+class TestConfigNullSafety:
+    """回归：YAML 里把新配置项写成 null/留空时不能崩。
+
+    同时确认 0 仍然表示"关闭"——不能用 ``cfg.get(k) or default`` 兜底，
+    那会把 0 吞成默认值。"""
+
+    def test_null_values_do_not_crash(self, tmp_path):
+        d = _dl(tmp_path, slow_node_min_speed_kb=None,
+                slow_node_min_bytes_mb=None, slow_node_min_samples=None,
+                slow_node_retries=None, retries=None, fragment_retries=None,
+                socket_timeout=None)
+        # 不应抛 int(None)/float(None)
+        d._check_slow_node()
+        opts = d._ytdlp_opts(tmp_path, "%(title)s.%(ext)s")
+        assert opts["retries"] == 10
+        assert opts["socket_timeout"] == 30
+
+    def test_zero_still_disables_detection(self, tmp_path):
+        d = _dl(tmp_path, slow_node_min_speed_kb=0, slow_node_min_bytes_mb=1,
+                slow_node_min_samples=2)
+        # 0 = 关闭：即使极慢也不判定
+        for _ in range(10):
+            d._downloaded_bytes += 1024
+            d._last_speed_at = time.time() - 1.1
+            d._check_slow_node()
+        assert d._speed_samples == []

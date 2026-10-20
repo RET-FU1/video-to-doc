@@ -3,7 +3,6 @@ downloader:
   cookies_from_browser: ''
   format: ''
   fragment_retries: 50
-  max_download_attempts: 3
   proxy: ''
   quality: best
   retries: 30

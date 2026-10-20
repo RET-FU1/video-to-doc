@@ -179,10 +179,29 @@ class App:
         self._cancel_token = CancelToken()
         # worker → 主线程的 UI 操作队列（tkinter 非线程安全，见 _ui/_pump_ui）
         self._ui_queue: "queue.Queue" = queue.Queue()
+        self._task_running: bool = False
         self._style_probe = ttk.Style(self.root)
         self._build_ui()
         self._center_window(940, 940)
         self.root.after(40, self._pump_ui)
+        # 处理中直接关窗会让进程退出、worker 可能写到一半（留下半截文件），
+        # 所以关窗前先确认，并把取消信号发出去让 worker 尽快收尾。
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        """关闭窗口：任务进行中先确认并请求取消"""
+        if self._task_running:
+            if not messagebox.askokcancel(
+                "任务进行中",
+                "当前任务还在处理，关闭窗口会中断它（已完成的进度会保留）。\n\n确定关闭吗？",
+            ):
+                return
+            self._cancel_token.cancel()
+            self._log("[WARN] 窗口关闭，正在中断任务…")
+            # 给 worker 一点时间落盘/清理，再销毁窗口
+            self.root.after(1200, self.root.destroy)
+            return
+        self.root.destroy()
 
     # ------------------------------------------------------------------
     # 布局
@@ -674,6 +693,7 @@ class App:
         self.stop_btn.configure(state="normal")
         self.progress.pack(fill="x", pady=(0, 12))
         self.progress.start()
+        self._task_running = True
         self._log(f"共 {len(urls)} 个任务，开始处理…")
         self._set_status(f"处理中 0/{len(urls)}")
 
@@ -768,6 +788,7 @@ class App:
             self._ui(self._done)
 
     def _done(self):
+        self._task_running = False
         self.progress.stop()
         self.progress.pack_forget()
         self.stop_btn.pack_forget()

@@ -90,3 +90,33 @@ class TestConfigMapping:
         t = Transcriber({"whisper": {}}, Path("."))
         invalid = [k for k in t._transcribe_kwargs() if k not in valid]
         assert invalid == [], f"传给 faster-whisper 的非法参数: {invalid}"
+
+
+class TestSegmentsUsable:
+    """回归：损坏/半截的 _segments.json 不能盲目复用，否则重建 .txt 时
+    抛 JSONDecodeError 且永远走不到重转。"""
+
+    def test_valid_list(self, tmp_path):
+        import json
+        p = tmp_path / "a_segments.json"
+        p.write_text(json.dumps([{"start": 0, "end": 1, "text": "你好"}]),
+                     encoding="utf-8")
+        assert Transcriber._segments_usable(p) is True
+
+    def test_truncated_json(self, tmp_path):
+        p = tmp_path / "b_segments.json"
+        p.write_text('[{"start": 0, "text": "半截', encoding="utf-8")
+        assert Transcriber._segments_usable(p) is False
+
+    def test_empty_list(self, tmp_path):
+        p = tmp_path / "c_segments.json"
+        p.write_text("[]", encoding="utf-8")
+        assert Transcriber._segments_usable(p) is False
+
+    def test_not_a_list(self, tmp_path):
+        p = tmp_path / "d_segments.json"
+        p.write_text('{"a": 1}', encoding="utf-8")
+        assert Transcriber._segments_usable(p) is False
+
+    def test_missing(self, tmp_path):
+        assert Transcriber._segments_usable(tmp_path / "nope.json") is False
