@@ -4,6 +4,7 @@
 """
 import json
 import logging
+import re
 import shutil
 import subprocess
 import threading
@@ -99,14 +100,53 @@ class Downloader:
 
     @staticmethod
     def _is_url(path: str) -> bool:
-        return path.startswith(("http://", "https://"))
+        """判断是否像视频链接。
+
+        不只看 `http(s)://` 前缀：用户从浏览器地址栏/分享面板复制时，经常
+        拿到的是**没有协议头**的裸域名（`bilibili.com/video/BV...`、
+        `www.bilibili.com/...`、`//bilibili.com/...`）。旧实现把这些当成
+        本地文件路径，直接报"本地文件不存在"（用户实际踩到）。
+        """
+        t = path.strip()
+        if not t:
+            return False
+        if re.match(r"^https?://", t, re.I):
+            return True
+        if t.startswith("//"):
+            return True
+        # 裸域名：必须"域名 + 斜杠 + 路径"，避免把 a.mp4 / videos/a.mp4 误判成 URL
+        return bool(re.match(r"^(?:www\.)?[\w-]+(?:\.[\w-]+)+/", t))
+
+    @staticmethod
+    def _normalize_url(text: str) -> str:
+        """补全缺失的协议头，返回可直接交给 yt-dlp 的 URL"""
+        t = text.strip()
+        if t.startswith("//"):
+            return "https:" + t
+        if re.match(r"^https?://", t, re.I):
+            return t
+        return "https://" + t
 
     @staticmethod
     def _extract_url(text: str) -> Optional[str]:
-        """从文本中提取第一个 URL（抖音/B站 分享链接经常附带大量描述文字）"""
-        import re
+        """从文本中提取第一个 URL（抖音/B站 分享链接经常附带大量描述文字）
+
+        同样允许没有协议头的裸域名 —— 分享文本里常见
+        `bilibili.com/video/BV1xx` 这种写法；同时要排除 Windows 本地路径。
+        """
+        # 1) 带协议头的最可靠，优先
         urls = re.findall(r'https?://[^\s]+', text)
-        return urls[0].rstrip(".,;:!?）)】]") if urls else None
+        if urls:
+            return urls[0].rstrip(".,;:!?）)】]，。；：！？、")
+        # 2) 裸域名 + 路径（且不能是 C:/... 这类盘符路径）
+        for candidate in re.findall(
+                r'(?<![\w./])(?:www\.)?[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+/[^\s]*', text):
+            if re.match(r"^[a-zA-Z]:", candidate):
+                continue
+            cleaned = candidate.rstrip(".,;:!?）)】]，。；：！？、")
+            if "." in cleaned.split("/")[0]:
+                return Downloader._normalize_url(cleaned)
+        return None
 
     @staticmethod
     def _quality_to_format(quality: str) -> str:
@@ -424,8 +464,12 @@ class Downloader:
 
     def download(self, url: str, output_subdir: Optional[str] = None) -> Tuple[Path, Dict[str, Any]]:
         """下载视频或导入本地文件，返回 (video_path, meta)"""
-        # 自动从粘贴文本中提取 URL（抖音/B站分享常附带大量描述文字）
-        if not self._is_url(url):
+        # 自动从粘贴文本中提取 URL（抖音/B站 分享常附带大量描述文字），
+        # 并补全缺失的协议头 —— 用户常直接粘 `bilibili.com/video/BV...`，
+        # 旧实现会把它当成本地文件路径而报"本地文件不存在"（用户实际踩到）。
+        if self._is_url(url):
+            url = self._normalize_url(url)
+        else:
             extracted = self._extract_url(url)
             if extracted:
                 logger.info("从粘贴文本中提取到链接: %s", extracted)
@@ -576,7 +620,15 @@ class Downloader:
         """导入本地视频文件到输出目录，返回 (video_path, meta)"""
         local: Path = Path(path).resolve()
         if not local.exists():
-            raise FileNotFoundError(f"本地文件不存在: {path}")
+            shown = path if len(path) <= 120 else path[:117] + "..."
+            # 给出可操作提示：这类报错多数是"想贴链接却少了协议头"，
+            # 或路径里有引号/空格没处理，而不是真的少了文件。
+            raise FileNotFoundError(
+                f"本地文件不存在: {shown}\n"
+                f"    · 如果这是视频链接，请检查是否包含完整域名（支持带或不带 https://，"
+                f"如 bilibili.com/video/BV...）\n"
+                f"    · 如果是本地文件，请确认路径正确（可用「浏览…」选择）"
+            )
         if not local.is_file():
             raise ValueError(f"路径不是文件: {path}")
 
@@ -620,6 +672,9 @@ class Downloader:
 
     def download_playlist(self, url: str) -> List[Tuple[Path, Dict[str, Any]]]:
         """下载播放列表所有视频，返回 [(video_path, meta), ...]"""
+        if not self._is_url(url):
+            url = self._extract_url(url) or url
+        url = self._normalize_url(url)
         logger.info("获取播放列表信息...")
         meta: Dict[str, Any] = self._fetch_meta(url)
         playlist_title: str = sanitize_filename(meta.get("title", meta.get("playlist", "playlist")))
@@ -767,7 +822,12 @@ class Downloader:
         return info
 
     def _fetch_meta(self, url: str) -> Dict[str, Any]:
-        """获取视频元信息：进程内 yt_dlp API 优先，subprocess 仅兜底"""
+        """获取视频元信息：进程内 yt_dlp API 优先，subprocess 仅兜底
+
+        这里再做一次 URL 规范化作为统一收口 —— 任何调用方（下载 / 播放列表 /
+        仅下载）漏了协议头都能被纠正，而不是让 yt-dlp 抛出看不懂的错误。
+        """
+        url = self._normalize_url(url)
         attempts: List[Tuple[str, Any]] = [
             ("yt_dlp API", self._meta_from_api),
             ("python -m yt_dlp", self._meta_from_subprocess),

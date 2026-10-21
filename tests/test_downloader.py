@@ -114,3 +114,58 @@ class TestExtractUrl:
 
     def test_no_url(self):
         assert Downloader._extract_url("没有链接") is None
+
+
+class TestUrlDetection:
+    """回归：用户从浏览器地址栏复制时经常拿到**没有协议头**的裸域名
+    （`bilibili.com/video/BV...`）。旧实现把它当本地文件路径，直接报
+    "本地文件不存在" —— 用户实际踩到。"""
+
+    def test_bare_domain_is_url(self):
+        d = Downloader({"downloader": {}}, Path("."))
+        assert d._is_url("bilibili.com/video/BV1NvJ66gEMn/?trackid=abc&spm_id_from=1.2.3.click")
+        assert d._is_url("www.bilibili.com/video/BV1xx")
+        assert d._is_url("//bilibili.com/video/BV1xx")
+        assert d._is_url("youtube.com/watch?v=abc")
+
+    def test_local_paths_are_not_urls(self):
+        d = Downloader({"downloader": {}}, Path("."))
+        for p in ("C:\\videos\\a.mp4", "C:/videos/a.mp4", "videos/a.mp4",
+                  "a.mp4", "my video file.mkv", "D:\\B站下载\\视频.mp4"):
+            assert not d._is_url(p), f"本地路径被误判为 URL: {p}"
+
+    def test_normalize_adds_scheme(self):
+        d = Downloader({"downloader": {}}, Path("."))
+        assert d._normalize_url("bilibili.com/x") == "https://bilibili.com/x"
+        assert d._normalize_url("//bilibili.com/x") == "https://bilibili.com/x"
+        assert d._normalize_url("https://a.com/x") == "https://a.com/x"
+
+    def test_extract_from_share_text_without_scheme(self):
+        d = Downloader({"downloader": {}}, Path("."))
+        got = d._extract_url("【标题】看看这个 bilibili.com/video/BV1NvJ66gEMn/?trackid=abc 很有意思")
+        assert got == "https://bilibili.com/video/BV1NvJ66gEMn/?trackid=abc"
+
+    def test_extract_with_scheme(self):
+        d = Downloader({"downloader": {}}, Path("."))
+        assert d._extract_url("https://www.bilibili.com/video/BV1x 复制打开") == \
+            "https://www.bilibili.com/video/BV1x"
+
+    def test_bare_url_does_not_go_to_import_local(self, tmp_path, monkeypatch):
+        """核心回归：裸域名必须走网络下载路径，而不是被当成本地文件"""
+        d = _make_downloader(tmp_path / "out")
+        called = {"import": 0, "meta": None}
+
+        monkeypatch.setattr(d, "_import_local",
+                            lambda *a, **k: called.__setitem__("import", called["import"] + 1))
+
+        def fake_fetch(url):
+            called["meta"] = url
+            raise RuntimeError("到这里说明 URL 已被正确识别")
+
+        monkeypatch.setattr(d, "_fetch_meta", fake_fetch)
+        try:
+            d.download("bilibili.com/video/BV1NvJ66gEMn/?trackid=abc")
+        except RuntimeError:
+            pass
+        assert called["import"] == 0, "裸域名不应走本地文件导入"
+        assert called["meta"] == "https://bilibili.com/video/BV1NvJ66gEMn/?trackid=abc"
