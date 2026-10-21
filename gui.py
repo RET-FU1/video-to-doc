@@ -845,10 +845,15 @@ class App:
             mark = "成功" if ok_ else f"失败（{err}）"
             self._log(f"    {label}: {mark}")
         if only_this:
-            self._log("    → 其他目录可正常打开，说明是**该输出目录本身的权限/属性**问题")
+            self._log("    → 其他目录可正常打开，说明是该输出目录本身的权限/属性问题")
         else:
-            self._log("    → 所有目录都无法用系统方式打开，说明是**系统的 shell / "
-                      "文件关联 / 安全软件**层面的问题，与本程序无关")
+            self._log("    → 所有目录都无法用系统方式打开。这通常**不是权限配置问题**，")
+            self._log("      而是安全软件（腾讯电脑管家 / 360 / 火绒 / Defender）")
+            self._log("      按「程序信誉」拦截了 python.exe 的 shell 调用。")
+            self._log("      修复方法：把下面两项加入安全软件的「信任区 / 白名单 / 排除项」，")
+            self._log(f"         1) {sys.executable}")
+            self._log(f"         2) {PROJECT_ROOT}")
+            self._log("      然后**重启本程序**再试（改配置后需要重启进程才生效）。")
 
         self._set_status("已打开目录列表")
         self._show_folder_window(output_dir, note=reason)

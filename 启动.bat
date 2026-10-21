@@ -1,25 +1,46 @@
 @echo off
 rem ============================================================
-rem  Video-to-Doc å¯åŠ¨å™¨ï¼ˆ.bat ç‰ˆæœ¬ï¼‰
+rem  Video-to-Doc Æô¶¯Æ÷£¨.bat£©
 rem
-rem  ä¸ºä»€ä¹ˆè¿˜éœ€è¦è¿™ä¸ªæ–‡ä»¶ï¼š
-rem  å¯åŠ¨.vbs ä¾èµ– Windows å¯¹ .vbs çš„æ–‡ä»¶å…³è”ã€‚å¦‚æœé‚£é¡¹å…³è”è¢«å®‰å…¨è½¯ä»¶
-rem  æˆ–ç³»ç»Ÿä¼˜åŒ–å·¥å…·æ”¹åŠ¨è¿‡ï¼ŒåŒå‡» å¯åŠ¨.vbs ä¼šå¼¹å‡º"æ‰“å¼€æ–¹å¼"å¯¹è¯æ¡†è€Œä¸æ˜¯
-rem  å¯åŠ¨ç¨‹åºã€‚.bat ä¸ä¾èµ–å…³è”ï¼ŒåŒå‡»å³å¯è¿è¡Œã€‚
+rem  ÓÃ pythonw.exe Æô¶¯£¬²»»á³öÏÖºÚÉ«¿ØÖÆÌ¨´°¿Ú¡£
+rem  ²»ÒÀÀµ .vbs µÄÎÄ¼ş¹ØÁª¡£
+rem  Èç¹ûË«»÷Ã»ÓĞÈÎºÎ·´Ó¦£¬Çë¸ÄÓÃ¡¸Æô¶¯£¨µ÷ÊÔ£©.bat¡¹£¬Ëü»áÏÔÊ¾¾ßÌå´íÎó¡£
+rem  ¸üÎÈÍ×µÄ·½Ê½£ºË«»÷Í¬Ä¿Â¼ÏÂµÄ¡¸ÊÓÆµ×ªÎÄµµ.lnk¡¹¿ì½İ·½Ê½¡£
 rem ============================================================
-chcp 65001 >nul
 cd /d "%~dp0"
 
-if not exist "venv\Scripts\pythonw.exe" (
+set "PYW=%~dp0venv\Scripts\pythonw.exe"
+set "PY=%~dp0venv\Scripts\python.exe"
+set "GUI=%~dp0gui.py"
+
+if not exist "%PYW%" (
     echo.
-    echo  [é”™è¯¯] æœªæ‰¾åˆ°è™šæ‹Ÿç¯å¢ƒï¼švenv\Scripts\pythonw.exe
-    echo         è¯·å…ˆåœ¨é¡¹ç›®ç›®å½•è¿è¡Œ:  python setup.py
+    echo  [´íÎó] Î´ÕÒµ½ĞéÄâ»·¾³: %PYW%
+    echo         ÇëÏÈÔÚÏîÄ¿Ä¿Â¼ÔËĞĞ:  python setup.py
     echo.
     pause
     exit /b 1
 )
 
-rem pythonw.exe å¯åŠ¨æ—¶ä¸ä¼šå¼¹å‡ºé»‘è‰²æ§åˆ¶å°çª—å£
-start "" "venv\Scripts\pythonw.exe" "gui.py"
+if not exist "%GUI%" (
+    echo.
+    echo  [´íÎó] Î´ÕÒµ½ gui.py: %GUI%
+    echo.
+    pause
+    exit /b 1
+)
 
+echo ÕıÔÚÆô¶¯ Video-to-Doc ...
+
+rem ÏÈÓÃ¿ØÖÆÌ¨°æ×Ô¼ìÒ»´Î£¬ÄÜÔÚÆô¶¯½×¶Î¾Í±©Â¶µ¼Èë´íÎó
+"%PY%" -c "import sys; sys.path.insert(0, r'%~dp0'); import gui" 2>nul
+if errorlevel 1 (
+    echo.
+    echo  [Æô¶¯Ê§°Ü] ³ÌĞò×Ô¼ìÎ´Í¨¹ı£¬Çë¸ÄÓÃ¡¸Æô¶¯£¨µ÷ÊÔ£©.bat¡¹²é¿´ÏêÏ¸´íÎó¡£
+    echo.
+    pause
+    exit /b 1
+)
+
+start "" "%PYW%" "%GUI%"
 exit /b 0
