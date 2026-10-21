@@ -25,6 +25,7 @@ pytest-cache-files-*/
 .pytest_cache/
 .acl_recovery/
 _tmp_verify/
+_verify_*/
 .tmp_t2/
 _t1_tmp/
 _t3_tmp_*

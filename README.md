@@ -341,6 +341,29 @@ A: 会。YouTube/B站视频的章节会自动提取并注入到转写文档中�
 4. **视频原文件不会被自动删除** — 下载的 `.mp4` 会一直留在 `output/` 下，需要手动清理 `output/`；
    只有 `.txt`、`_subtitle.*`、`_zh.txt` 这类可再生的中间文件会在任务完成后自动清理（`_segments.json` 保留，供重跑字幕与质检使用）。
 
+## 项目结构
+
+```
+main.py              CLI 入口（--check 环境自检）
+gui.py               图形界面主窗口
+ui_theme.py          配色 / 字体等设计令牌
+ui_widgets.py        自定义控件（胶囊开关 Chip、扁平按钮 FlatButton）
+file_browser.py      应用内目录浏览器（系统 shell 打不开时的兜底）
+pipeline.py          流水线编排（下载 → 转写 → 翻译 → 抛光 → 总结 → 字幕）
+downloader.py        下载（yt-dlp 封装、格式候选回退、音轨校验、超时看门狗）
+transcriber.py       faster-whisper 转写、音频提取、低置信度报告
+summarizer.py        LLM 总结与标点分段
+styles.py            总结风格表（唯一数据源）
+fidelity.py          保真校验（长度比 / 相似度 / 英文词丢失）
+translator.py        逐行翻译（保持与段落 1:1）
+subtitle.py          SRT 生成
+subtitle_extractor.py 平台字幕提取
+format_converter.py  md / txt / html 输出
+utils.py             共享工具（取消令牌、配置校验、ffmpeg 查找等）
+setup.py             一键初始化（虚拟环境 / 依赖 / 模型）
+tests/               223 个单元与集成测试
+```
+
 ## 技术栈
 
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — 视频下载

@@ -50,12 +50,14 @@ class Translator:
     """逐行翻译器 — 复用现有 OpenAI 兼容客户端"""
 
     def __init__(self, client, model: str, target_lang: str = "zh",
-                 max_lines_per_chunk: int = 80, timeout: float = 120) -> None:
+                 max_lines_per_chunk: int = 80, timeout: float = 120,
+                 max_tokens: int = 8192) -> None:
         self.client = client
         self.model = model
         self.target_lang = target_lang
         self.max_lines = max_lines_per_chunk
         self.timeout = timeout
+        self.max_tokens = max_tokens
 
     def translate(self, text: str) -> str:
         """翻译整段文本，逐行翻译保持行结构
@@ -149,7 +151,7 @@ class Translator:
         try:
             resp = self.client.chat.completions.create(
                 model=self.model,
-                max_tokens=8192,
+                max_tokens=self.max_tokens,
                 messages=[{"role": "user", "content": prompt}],
                 timeout=self.timeout,
             )

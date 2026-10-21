@@ -17,6 +17,18 @@ from utils import (sanitize_filename, find_ffmpeg, set_state, PROJECT_ROOT,
 
 logger = logging.getLogger(__name__)
 
+# ── 外部进程与 VAD 参数 ──
+# 提取音频可能要对几小时的视频解码，给足时间（单位：秒）
+FFMPEG_TIMEOUT_SEC = 1800
+# ffprobe 只读元信息，应很快返回
+FFPROBE_TIMEOUT_SEC = 60
+# 提取给 whisper 的音频规格：16kHz 单声道（whisper 原生输入）
+AUDIO_SAMPLE_RATE = 16000
+AUDIO_CHANNELS = 1
+# VAD：判定静音的最短时长、语音前后补白（毫秒）
+VAD_MIN_SILENCE_MS = 500
+VAD_SPEECH_PAD_MS = 400
+
 _GPU_ERROR_KEYWORDS: List[str] = [
     "cublas", "cuda", "cudnn", "out of memory", "no kernel image",
     "invalid device", "device not found", "driver is too old",
@@ -211,8 +223,8 @@ class Transcriber:
         if _as_bool(cfg.get("vad_enabled", True)):
             kwargs["vad_filter"] = True
             kwargs["vad_parameters"] = {
-                "min_silence_duration_ms": 500,
-                "speech_pad_ms": 400,
+                "min_silence_duration_ms": VAD_MIN_SILENCE_MS,
+                "speech_pad_ms": VAD_SPEECH_PAD_MS,
             }
 
         # 幻觉静音阈值：只在配置了值时才传（None 是"不启用"，不用显式传）
@@ -425,12 +437,14 @@ class Transcriber:
         if fmt == "wav":
             # 16kHz 单声道 pcm_s16le：whisper 的原生输入格式
             cmd: List[str] = [ffmpeg, "-i", str(video_path), "-vn", "-acodec", "pcm_s16le",
-                              "-ar", "16000", "-ac", "1", "-y", str(audio_path)]
+                              "-ar", str(AUDIO_SAMPLE_RATE), "-ac", str(AUDIO_CHANNELS),
+                              "-y", str(audio_path)]
         else:
             cmd: List[str] = [ffmpeg, "-i", str(video_path), "-vn", "-acodec", "mp3",
                               "-q:a", "2", "-y", str(audio_path)]
         try:
-            subprocess.run(cmd, capture_output=True, check=True, timeout=1800)
+            subprocess.run(cmd, capture_output=True, check=True,
+                           timeout=FFMPEG_TIMEOUT_SEC)
         except subprocess.CalledProcessError as e:
             stderr_tail = (e.stderr or b"").decode("utf-8", "replace").strip().split("\n")[-3:]
             raise RuntimeError(
@@ -459,7 +473,7 @@ class Transcriber:
             result = subprocess.run(
                 [ffprobe, "-v", "error", "-select_streams", "a",
                  "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(video_path)],
-                capture_output=True, text=True, timeout=60,
+                capture_output=True, text=True, timeout=FFPROBE_TIMEOUT_SEC,
             )
         except (OSError, subprocess.SubprocessError):
             return True

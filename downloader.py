@@ -26,6 +26,15 @@ _WATCHDOG_POLL = 0.25
 # 叫停工作线程后最多等多久（秒）。若线程卡死在 socket 读上、根本没有进度
 # 回调可触发，就不再无谓死等，直接弃用本次尝试、换下一个候选。
 _ABORT_JOIN_TIMEOUT = 3.0
+# 最多生成多少个 format 候选（避免在同一个视频上无限换格式重试）
+MAX_FORMAT_CANDIDATES = 5
+# 有多个候选时，每个候选只给少量重试：卡在坏 CDN 上重试 30 次要 9 分钟（实测），
+# 而换下一个候选通常 10 秒就能下完，所以优先"快速换路"
+PER_CANDIDATE_RETRIES = 2
+# 换候选之间的递增等待上限（秒）
+CANDIDATE_RETRY_BACKOFF_MAX = 2
+# 下载进度日志的节流间隔（秒），避免刷屏
+PROGRESS_LOG_INTERVAL = 10
 
 
 def _num(value: Any, default: float) -> float:
@@ -254,7 +263,7 @@ class Downloader:
             seen.add(fid)
             audio = best_audio or "bestaudio"
             candidates.append(f"{fid}+{audio}")
-            if len(candidates) >= 5:      # 最多试 5 个，避免无限重试
+            if len(candidates) >= MAX_FORMAT_CANDIDATES:
                 break
 
         candidates.append("bestvideo+bestaudio/best")
@@ -278,7 +287,7 @@ class Downloader:
             self._total_bytes = (d.get("total_bytes")
                                  or d.get("total_bytes_estimate") or 0)
             now = time.time()
-            if now - self._last_progress_log < 10:
+            if now - self._last_progress_log < PROGRESS_LOG_INTERVAL:
                 return
             self._last_progress_log = now
             pct = (d.get("_percent_str") or "?").strip()
@@ -520,8 +529,9 @@ class Downloader:
             candidates: List[str] = self._format_candidates(quality)
             # 每个候选只给少量重试：卡在坏 CDN 上重试 30 次要 9 分钟（实测），
             # 而换下一个编码/CDN 通常 10 秒就能下完。这里优先"快速换路"。
-            per_candidate_retries = 2 if len(candidates) > 1 else int(
-                self.dl_config.get("retries", 10))
+            per_candidate_retries = (PER_CANDIDATE_RETRIES
+                                     if len(candidates) > 1
+                                     else int(self.dl_config.get("retries") or 10))
 
             for idx, fmt in enumerate(candidates, 1):
                 self._check_cancel()
@@ -562,7 +572,7 @@ class Downloader:
                         # 换下一个编码/CDN 节点重试：这才是 B站 下载失败最常见的解法
                         logger.warning("格式 %s 下载失败（%s）；换下一个候选重试...",
                                        fmt, str(e).strip().splitlines()[-1][:120])
-                        time.sleep(min(idx, 2))
+                        time.sleep(min(idx, CANDIDATE_RETRY_BACKOFF_MAX))
                     else:
                         raise
 

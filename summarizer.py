@@ -3,148 +3,21 @@
 支持 OpenAI 兼容 API（DeepSeek、智谱、通义千问、月之暗面等国内服务商）
 支持长文本自动分段总结 + 汇总
 """
-import difflib
 import logging
-import re
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Optional
 
 from openai import OpenAI
+
+# ── 保真校验 ──
+# 实现已抽到 fidelity.py（改造前 pipeline 和这里各写一套，阈值还不一致，
+# 会出现"分块通过、全片回退"的诡异现象）。这里保留旧名字做兼容别名。
+from fidelity import verify as _verify_fidelity
+
+from styles import BUILTIN_STYLE_KEYS, DEFAULT_STYLE
 from utils import load_env, split_text
 
 logger = logging.getLogger(__name__)
-
-# ── 抛光保真守卫用的正则 ──
-# 抛光输入每行带 [MM:SS] 时间戳前缀，提示词要求输出时去掉，比对前也必须先去掉。
-# 分块文本单独送 LLM 后可能跨小时，分钟位允许 2 位以上（pipeline 用 %02d 格式化）。
-_TIME_PREFIX_RE = re.compile(r"^\[\d{2,}:\d{2}\]\s*", re.MULTILINE)
-# 归一化时去掉的标点 / 空白 / 格式标记（长度与相似度比对只看正文）
-_FIDELITY_STRIP_RE = re.compile(
-    r"[\s，。、；：？！“”‘’（）《》〈〉【】…—–\-·,.;:?!()\[\]{}<>\"'`~#*|/\\]"
-)
-_EN_WORD_RE = re.compile(r"[A-Za-z]{3,}")
-_NUMBER_RE = re.compile(r"\d+")
-# 多说话人模式下模型会合法地新增「说话人A：」这类标签，比对前要剔除，
-# 否则短分块会被误判成"长度异常"（标签占比过大）而错误回退原文
-_SPEAKER_LABEL_RE = re.compile(
-    r"(?:^|(?<=\n))\s*(?:说话人\s*[A-Za-z0-9]+|SPEAKER[_\s]*\d+)\s*[:：]\s*",
-    re.MULTILINE,
-)
-
-
-def _strip_time_prefix(text: str) -> str:
-    """去掉行首的 [MM:SS] 时间戳标记（提示词要求输出不含时间标记）"""
-    return _TIME_PREFIX_RE.sub("", text or "")
-
-
-def _fallback_text(src: str) -> str:
-    """保真校验失败时的回退文本。
-
-    没有 [MM:SS] 前缀时原样返回 src；有前缀时去掉前缀（否则时间戳会被当成
-    正文写进转写稿），这是"回退原文"语义的最小改动。
-    """
-    if _TIME_PREFIX_RE.search(src or ""):
-        return _TIME_PREFIX_RE.sub("", src).strip()
-    return src
-
-
-def _normalize_for_fidelity(text: str) -> str:
-    """去时间戳、标点、空白，得到只含正文的归一化串"""
-    return _FIDELITY_STRIP_RE.sub("", _strip_time_prefix(text))
-
-
-def _strip_speaker_labels(text: str) -> str:
-    """去掉多说话人模式新增的「说话人A：」标签，只留正文"""
-    return _SPEAKER_LABEL_RE.sub("", text or "")
-
-
-def _token_loss(src: str, out: str) -> Tuple[float, List[str]]:
-    """统计英文词 / 数字的丢失情况，返回 (丢失比例, 丢失的长英文词列表)。
-
-    英文词不区分大小写；长英文词（长度 >= 6）丢失往往意味着整段被截断或漏译。
-    """
-    src_words: Set[str] = {w.lower() for w in _EN_WORD_RE.findall(src)}
-    out_words: Set[str] = {w.lower() for w in _EN_WORD_RE.findall(out)}
-    src_nums: Set[str] = set(_NUMBER_RE.findall(src))
-    out_nums: Set[str] = set(_NUMBER_RE.findall(out))
-
-    total = len(src_words) + len(src_nums)
-    if total == 0:
-        return 0.0, []
-
-    lost_words = sorted(w for w in src_words if w not in out_words)
-    lost_nums = sorted(n for n in src_nums if n not in out_nums)
-    lost_ratio = (len(lost_words) + len(lost_nums)) / total
-    long_lost = [w for w in lost_words if len(w) >= 6]
-    return lost_ratio, long_lost
-
-
-def _verify_fidelity(src: str, out: str, label: str = "抛光") -> str:
-    """确定性保真守卫：输出明显异常时回退原文并告警。
-
-    提示词写着"不要增删改任何文字"，但模型仍会静默改写 / 截断 / 漏段，
-    之前只做 `return content or text`，完全发现不了。这里用三个与模型无关的
-    指标兜底（只校验 src，context 是上下文、不参与校验）：
-
-    1. 归一化后长度比不在 [0.85, 1.25] → 回退
-    2. 字符相似度（difflib，autojunk=False）< 0.75 → 回退
-    3. 英文词 / 数字丢失超过 20%，或丢失任意长度 >= 6 的英文词 → 回退
-
-    比对时会剔除模型合法新增的「说话人X：」标签，避免多说话人模式误报；
-    但**通过校验时原样返回模型输出**，绝不修改它的合法产物（否则多说话人
-    模式的标注会被守卫吃掉）。
-    """
-    raw_out = out or ""
-    compared = _strip_speaker_labels(raw_out)
-    body = _strip_time_prefix(src or "")
-    if not body.strip():
-        return raw_out
-    if not compared.strip():
-        logger.warning("%s：模型输出为空，疑似截断，已回退原文", label)
-        return _fallback_text(src)
-
-    norm_src = _normalize_for_fidelity(src)
-    norm_out = _normalize_for_fidelity(compared)
-    if not norm_src:
-        return raw_out
-
-    ratio = len(norm_out) / len(norm_src)
-    if not 0.85 <= ratio <= 1.25:
-        logger.warning(
-            "%s：输出长度异常（原文 %d 字 → 输出 %d 字，%.0f%%），疑似改写/截断，已回退原文",
-            label, len(norm_src), len(norm_out), ratio * 100,
-        )
-        return _fallback_text(src)
-
-    similarity = difflib.SequenceMatcher(None, norm_src, norm_out, autojunk=False).ratio()
-    if similarity < 0.75:
-        logger.warning(
-            "%s：输出与原文相似度过低（%.2f），疑似改写/截断，已回退原文",
-            label, similarity,
-        )
-        return _fallback_text(src)
-
-    lost_ratio, long_lost = _token_loss(body, compared)
-    if long_lost:
-        logger.warning(
-            "%s：输出丢失英文词 %s，疑似漏段/截断，已回退原文",
-            label, "、".join(long_lost[:5]),
-        )
-        return _fallback_text(src)
-    if lost_ratio > 0.20:
-        logger.warning(
-            "%s：输出丢失 %.0f%% 的英文词/数字（超过 20%%），疑似改写/截断，已回退原文",
-            label, lost_ratio * 100,
-        )
-        return _fallback_text(src)
-
-    # 校验通过：原样返回模型输出（保留它合法新增的「说话人A：」标签），
-    # 只兜掉模型偶尔忘记去掉的行首 [MM:SS] 时间戳
-    if _TIME_PREFIX_RE.search(raw_out):
-        logger.debug("%s：模型输出残留时间戳，已剥离", label)
-        return _strip_time_prefix(raw_out)
-    return raw_out
-
 
 # ── API 服务商预设 ──
 # 选一个 provider 即可，base_url 和 model 会自动填充
@@ -272,6 +145,14 @@ class OpenAICompatSummarizer:
         ),
     }
 
+    # 提示词必须覆盖 styles.py 里所有"有内置提示词"的风格，
+    # 否则新增风格后会静默回退到默认提示词，产物内容与名字不符。
+    _missing_prompts = set(BUILTIN_STYLE_KEYS) - set(STYLE_PROMPTS)
+    if _missing_prompts:
+        raise RuntimeError(
+            f"styles.py 定义了内置风格 {sorted(_missing_prompts)}，"
+            f"但 summarizer.STYLE_PROMPTS 缺少对应提示词")
+
     def __init__(self, config: Dict[str, Any]) -> None:
         import os
 
@@ -306,15 +187,16 @@ class OpenAICompatSummarizer:
 
         self.client: OpenAI = OpenAI(api_key=api_key, base_url=base_url, timeout=self._timeout)
 
-    def summarize(self, text: str, meta: Dict[str, Any], style: str = "auto") -> str:
+    def summarize(self, text: str, meta: Dict[str, Any], style: str = DEFAULT_STYLE) -> str:
         # 自定义提示词优先
         if style == "custom":
             prompt_instruction = self.config.get("custom_prompt", "")
             if not prompt_instruction:
-                logger.warning("未配置 custom_prompt，回退到 auto 风格")
-                prompt_instruction = self.STYLE_PROMPTS["auto"]
+                logger.warning("未配置 custom_prompt，回退到 %s 风格", DEFAULT_STYLE)
+                prompt_instruction = self.STYLE_PROMPTS[DEFAULT_STYLE]
         else:
-            prompt_instruction = self.STYLE_PROMPTS.get(style, self.STYLE_PROMPTS["auto"])
+            prompt_instruction = self.STYLE_PROMPTS.get(
+                style, self.STYLE_PROMPTS[DEFAULT_STYLE])
 
         if len(text) <= self.max_chunk:
             return self._summarize_chunk(text, meta, prompt_instruction)

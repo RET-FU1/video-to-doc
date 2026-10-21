@@ -13,25 +13,28 @@ from downloader import Downloader
 from transcriber import Transcriber
 from summarizer import create_summarizer
 from format_converter import save_formats
+from fidelity import POLISH, normalize, strip_time_prefix, verify
+# STYLE_CN 在此再导出：外部代码与测试沿用 `from pipeline import STYLE_CN`
+from styles import STYLE_CN, STYLE_PREFIXES, DEFAULT_STYLE, label_of  # noqa: F401
 from utils import (get_state, set_state, split_text, MEDIA_EXTS,
                    sanitize_filename, CancelledError, CancelToken)
 
 logger = logging.getLogger(__name__)
 
-# 总结风格 → 中文名（总结文件名前缀、断点续跑标记都依赖它，只定义一次）
-STYLE_CN: Dict[str, str] = {
-    "auto": "全面总结",
-    "knowledge_points": "知识点",
-    "steps": "操作步骤",
-    "core_ideas": "核心观点",
-    "expert": "专家深度",
-    "custom": "自定义",
-}
+# ── 抛光分块参数 ──
+# 单块送入 LLM 的最大字符数。太小会多花请求、太大容易触发输出截断。
+POLISH_CHUNK_CHARS = 4000
+# 传给下一块作为"上文参考"的尾部字符数（不参与保真校验）
+POLISH_CONTEXT_CHARS = 200
+# 合并相邻块时，用于"去重回显"的最大比对前缀长度
+ECHO_MAX_CHECK_CHARS = 400
+# 视为"整段回显"的最短匹配长度（小于这个长度容易误判）
+ECHO_MIN_MATCH_CHARS = 20
 
 
 def _normalize_for_match(text: str) -> str:
-    """去掉标点与空白，用于跨分块文本比对"""
-    return re.sub(r"[\s，。、；：？！“”‘’（）《》…—\-·,.;:?!()\[\]\"'`~]", "", text)
+    """去掉标点与空白，用于跨分块文本比对（实现见 fidelity.normalize）"""
+    return normalize(text)
 
 
 class Pipeline:
@@ -69,6 +72,9 @@ class Pipeline:
                 client=self.summarizer.client,
                 model=t_config.get("model", "") or self.summarizer.model,
                 target_lang=t_config.get("target_lang", "zh"),
+                # 翻译同样受 token 预算限制：沿用 summarizer.max_tokens，
+                # 而不是在 translator 里写死一个与配置无关的数字
+                max_tokens=int(self.config.get("summarizer", {}).get("max_tokens") or 8192),
             )
         return self._translator
 
@@ -117,9 +123,10 @@ class Pipeline:
             raise ValueError("未选择任何输出格式（md/txt/html 至少选一个）")
 
         style_cfg = self.config.get("summarizer", {})
-        style_val = style_cfg.get("summary_styles") or style_cfg.get("summary_style", "auto")
+        style_val = (style_cfg.get("summary_styles")
+                     or style_cfg.get("summary_style") or DEFAULT_STYLE)
         styles: List[str] = style_val if isinstance(style_val, list) else [style_val]
-        styles = [s for s in styles if s] or ["auto"]   # 空列表/空串一律回退 auto
+        styles = [s for s in styles if s] or [DEFAULT_STYLE]   # 空列表/空串一律回退默认风格
 
         # 判断"是否已完成"必须覆盖**本次请求的全部产物**，不能只看第一个
         # 风格 + 第一个格式：
@@ -132,7 +139,7 @@ class Pipeline:
             expected.append(folder / f"{stem}.srt")
         for style in ([""] if self._skip_summary else styles):
             for fmt in formats:
-                base = f"{stem}" if self._skip_summary else f"{STYLE_CN.get(style, style)}-{stem}"
+                base = f"{stem}" if self._skip_summary else f"{label_of(style)}-{stem}"
                 expected.append(folder / f"{base}.{fmt}")
         missing = [p for p in expected if not p.exists()]
 
@@ -208,7 +215,7 @@ class Pipeline:
                 self._check_cancel()
                 logger.info("  风格: %s", style)
                 summary_text: str = self.summarizer.summarize(transcript_md, meta, style=style)
-                style_cn = STYLE_CN.get(style, style)
+                style_cn = label_of(style)
                 save_formats(summary_text, folder / f"{style_cn}-{stem}", formats, meta=meta)
 
         # 6) 清理中间文件（先清理再标 done：清理若失败，下次重跑还能补做）
@@ -342,15 +349,8 @@ class Pipeline:
 
     @staticmethod
     def _strip_time_prefix(text: str) -> str:
-        lines = []
-        for line in text.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            line = re.sub(r"^\[\d{1,3}:\d{2}\]\s*", "", line)
-            if line:
-                lines.append(line)
-        return "\n".join(lines)
+        """去掉行首 [MM:SS] 并丢弃空行（实现见 fidelity.strip_time_prefix）"""
+        return strip_time_prefix(text, drop_empty_lines=True)
 
     # ------------------------------------------------------------------
     # 抛光
@@ -364,7 +364,7 @@ class Pipeline:
         现在改为：分块不重叠，上下文单独传给 LLM 并要求"不要输出"，
         合并时再用确定性前缀去重兜底 —— 无论 LLM 是否回显上下文都不会丢内容。
         """
-        max_input_chars: int = 4000
+        max_input_chars: int = POLISH_CHUNK_CHARS
         label = "多说话人抛光" if multispeaker else "抛光"
 
         if len(raw_text) <= max_input_chars:
@@ -372,7 +372,7 @@ class Pipeline:
 
         chunks = split_text(raw_text, max_input_chars, sep="\n")
         polished: List[Optional[str]] = [None] * len(chunks)
-        context_chars = 200
+        context_chars = POLISH_CONTEXT_CHARS
 
         max_workers = min(4, len(chunks))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -417,7 +417,8 @@ class Pipeline:
         return text[nl + 1:] if nl != -1 else text[start:]
 
     @staticmethod
-    def _strip_echoed_context(acc: str, new: str, max_check: int = 400) -> str:
+    def _strip_echoed_context(acc: str, new: str,
+                              max_check: int = ECHO_MAX_CHECK_CHARS) -> str:
         """若新分块开头回显了已累积文本的结尾，按规范化的最长公共部分切掉。
 
         这是确定性去重：LLM 回显了就切，没回显就原样保留，绝不靠"砍掉第一段"猜测。
@@ -429,11 +430,11 @@ class Pipeline:
 
         limit = min(len(norm_acc), len(norm_new), max_check)
         overlap = 0
-        for size in range(limit, 19, -1):
+        for size in range(limit, ECHO_MIN_MATCH_CHARS - 1, -1):
             if norm_acc[-size:] == norm_new[:size]:
                 overlap = size
                 break
-        if overlap < 20:
+        if overlap < ECHO_MIN_MATCH_CHARS:
             return new
 
         # 把规范化长度映射回原文位置
@@ -495,22 +496,12 @@ class Pipeline:
 
     @staticmethod
     def _verify_polish(source: str, polished: str) -> str:
-        """整体保真校验：长度或相似度明显异常时回退原文并告警。
+        """全片保真兜底：与分块校验**同一实现、同一阈值**。
 
-        单个分块已有 guard，这里是全片兜底，防止"看起来成功但内容被改写/截断"。
-        多说话人模式下模型会合法新增「说话人A：」标签，比对前必须剔除，
-        否则短文本会被误判成"长度翻倍"而错误回退（本次实测踩到过）。
+        改造前分块用 0.75 相似度、全片用 0.90，会出现"每个分块都通过、
+        最后整篇被回退"的诡异现象。现在统一走 fidelity.verify(POLISH)。
         """
-        import difflib
-
-        from summarizer import _strip_speaker_labels
-
-        body = Pipeline._strip_time_prefix(source)
-        compared = _strip_speaker_labels(polished)
-        norm_src = _normalize_for_match(body)
-        norm_out = _normalize_for_match(compared)
-        if not norm_src:
-            return polished
+        return verify(source, polished, label="抛光", thresholds=POLISH)
         ratio = len(norm_out) / len(norm_src)
         if not 0.85 <= ratio <= 1.25:
             logger.warning("抛光结果长度异常（原文 %d 字 → %d 字，%.0f%%），回退原文",
@@ -685,7 +676,7 @@ class Pipeline:
 
         formats: List[str] = self.config.get("summarizer", {}).get("output_formats", ["md"])
         exts = set(f".{f}" for f in formats)
-        prefixes = tuple(f"{cn}-" for cn in STYLE_CN.values())
+        prefixes = STYLE_PREFIXES
 
         transcript_dir = group_dir / "转写汇总"
         summary_dir = group_dir / "总结汇总"

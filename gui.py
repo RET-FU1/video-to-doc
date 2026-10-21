@@ -31,44 +31,14 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 import yaml
+from file_browser import FolderBrowser
 from pipeline import Pipeline
-from utils import (CancelToken, CancelledError, load_env, setup_logging,
-                   fmt_size)
+from styles import STYLES, DEFAULT_STYLE
+from ui_theme import C, F
+from ui_widgets import Chip, FlatButton
+from utils import (CancelToken, CancelledError, load_env, setup_logging)
 
 PROJECT_ROOT = Path(__file__).parent
-
-# ── 设计令牌 ──────────────────────────────────────────────
-C = {
-    "bg":         "#F6F6F7",   # 页面底色（近白灰）
-    "card":       "#FFFFFF",   # 卡片
-    "border":     "#E7E7E9",   # 细边框
-    "border_2":   "#D9D9DE",   # 输入框边框
-    "text":       "#18181B",   # 主文字
-    "muted":      "#6F6F76",   # 次要文字
-    "faint":      "#9A9AA2",   # 提示文字
-    "accent":     "#4F46E5",   # 强调色（靛蓝）
-    "accent_2":   "#4338CA",   # hover
-    "accent_soft": "#EEF0FF",  # 浅强调底
-    "hover":      "#F0F0F2",   # 中性 hover
-    "danger":     "#DC2626",
-    "danger_2":   "#B91C1C",
-    "log_bg":     "#17171A",
-    "log_fg":     "#D4D4D8",
-    "log_warn":   "#FBBF24",
-    "log_err":    "#F87171",
-    "log_ok":     "#4ADE80",
-    "log_stage":  "#93C5FD",
-}
-
-F = {
-    "title":   ("Microsoft YaHei UI", 15, "bold"),
-    "section": ("Microsoft YaHei UI", 10, "bold"),
-    "body":    ("Microsoft YaHei UI", 10),
-    "chip":    ("Microsoft YaHei UI", 9),
-    "small":   ("Microsoft YaHei UI", 9),
-    "mono":    ("Consolas", 9),
-}
-
 
 class _GuiLogHandler(logging.Handler):
     """日志处理器：将 log 消息桥接到 GUI 日志窗口"""
@@ -79,94 +49,6 @@ class _GuiLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         self._app._log(self.format(record))
-
-
-class Chip(tk.Label):
-    """可选中的胶囊按钮（替代原生 Checkbutton）
-
-    原生 Checkbutton 在 Windows 上会画一个方框和焦点虚线，观感和现代界面差距大。
-    这里用 Label 自己实现：选中 = 实心强调色底 + 白字，未选中 = 白底细边框。
-    """
-
-    def __init__(self, parent, text, variable, command=None, **kw):
-        self._var = variable
-        self._command = command
-        self._enabled = True
-        super().__init__(parent, text=text, font=F["chip"], bd=0,
-                         padx=12, pady=5, cursor="hand2",
-                         highlightthickness=1, **kw)
-        self.bind("<Button-1>", self._on_click)
-        self.bind("<Enter>", self._on_enter)
-        self.bind("<Leave>", self._on_leave)
-        self._refresh()
-
-    def _on_click(self, _e=None):
-        if not self._enabled:
-            return
-        self._var.set(not self._var.get())
-        self._refresh()
-        if self._command:
-            self._command()
-
-    def _on_enter(self, _e=None):
-        if not self._enabled:
-            return
-        if not self._var.get():
-            self.configure(bg=C["hover"])
-
-    def _on_leave(self, _e=None):
-        self._refresh()
-
-    def _refresh(self):
-        if not self._enabled:
-            self.configure(bg=C["card"], fg=C["faint"],
-                           highlightbackground=C["border"],
-                           highlightcolor=C["border"])
-            return
-        if self._var.get():
-            self.configure(bg=C["accent"], fg="white",
-                           highlightbackground=C["accent"],
-                           highlightcolor=C["accent"])
-        else:
-            self.configure(bg=C["card"], fg=C["text"],
-                           highlightbackground=C["border_2"],
-                           highlightcolor=C["border_2"])
-
-    def set_enabled(self, enabled: bool) -> None:
-        self._enabled = bool(enabled)
-        self.configure(cursor="hand2" if enabled else "arrow")
-        self._refresh()
-
-
-class FlatButton(tk.Button):
-    """扁平按钮：无边框、有 hover / pressed 反馈"""
-
-    def __init__(self, parent, text, command, *, kind="secondary",
-                 compact=False, **kw):
-        self._kind = kind
-        if kind == "primary":
-            bg, fg, hover, pressed = C["accent"], "white", C["accent_2"], "#3730A3"
-        elif kind == "danger":
-            bg, fg, hover, pressed = C["danger"], "white", C["danger_2"], "#991B1B"
-        else:
-            bg, fg, hover, pressed = C["card"], C["text"], C["hover"], "#E8E8EA"
-        self._bg, self._fg, self._hover, self._pressed = bg, fg, hover, pressed
-        padx, pady = (12, 5) if compact else (18, 8)
-        font = F["chip"] if compact else F["body"]
-        super().__init__(parent, text=text, command=command, font=font,
-                         bg=bg, fg=fg, activebackground=hover, activeforeground=fg,
-                         relief="flat", bd=0, cursor="hand2",
-                         padx=padx, pady=pady, highlightthickness=0, **kw)
-        self.bind("<Enter>", lambda _e: self._set_bg(self._hover))
-        self.bind("<Leave>", lambda _e: self._set_bg(self._bg))
-        self.bind("<ButtonPress-1>", lambda _e: self._set_bg(self._pressed))
-        self.bind("<ButtonRelease-1>", lambda _e: self._set_bg(self._hover))
-
-    def _set_bg(self, color):
-        try:
-            self.configure(bg=color)
-        except tk.TclError:
-            pass
 
 
 class App:
@@ -428,16 +310,15 @@ class App:
             tk.Label(row2, text="总结", font=F["small"],
                      fg=C["muted"], bg=C["card"]).pack(side="left", padx=(0, 8))
 
+            # 风格列表来自 styles.py（唯一数据源），不在这里硬编码
             self.style_checkboxes = {}
             self._style_chips = {}
-            for label, key in [("全面总结", "auto"), ("知识点", "knowledge_points"),
-                               ("操作步骤", "steps"), ("核心观点", "core_ideas"),
-                               ("专家深度", "expert"), ("自定义", "custom")]:
-                var = tk.BooleanVar(value=(key == "auto"))
-                chip = Chip(row2, label, var, command=self._on_style_change)
+            for style in STYLES:
+                var = tk.BooleanVar(value=(style.key == DEFAULT_STYLE))
+                chip = Chip(row2, style.label, var, command=self._on_style_change)
                 chip.pack(side="left", padx=(0, 5))
-                self.style_checkboxes[key] = (var, chip)
-                self._style_chips[key] = chip
+                self.style_checkboxes[style.key] = (var, chip)
+                self._style_chips[style.key] = chip
 
             # 自定义提示词（勾选"自定义"时出现）
             self.custom_prompt_frame = tk.Frame(card, bg=C["card"])
@@ -925,167 +806,13 @@ class App:
             self._log(f"         2) {PROJECT_ROOT}")
 
         self._set_status("已打开目录列表")
-        self._show_folder_window(output_dir, note=reason)
+        FolderBrowser(self.root, output_dir,
+                      open_path=App._open_path,
+                      copy_path=self._copy_path,
+                      log=self._log,
+                      note=reason)
 
     # ---- 应用内目录浏览器（不依赖系统 shell，任何环境都能用）----
-
-    def _show_folder_window(self, folder: Path, note: str = ""):
-        """在应用内列出目录内容，并可进入子目录 / 打开文件"""
-        win = tk.Toplevel(self.root)
-        win.title("输出目录")
-        win.configure(bg=C["bg"])
-        win.geometry("760x560")
-        win.minsize(560, 360)
-        try:
-            win.transient(self.root)
-        except tk.TclError:
-            pass
-
-        state = {"dir": Path(folder)}
-
-        # 顶部：路径 + 操作
-        head = tk.Frame(win, bg=C["card"], padx=16, pady=10)
-        head.pack(fill="x")
-        tk.Frame(win, bg=C["border"], height=1).pack(fill="x")
-
-        path_var = tk.StringVar(value=str(folder))
-        entry = tk.Entry(head, textvariable=path_var, font=F["body"],
-                         bg=C["bg"], fg=C["text"], relief="flat", borderwidth=0,
-                         state="readonly", readonlybackground=C["bg"])
-        entry.pack(side="left", fill="x", expand=True, ipady=4, padx=(0, 10))
-        self._add_context_menu(entry)
-
-        if note:
-            tk.Label(win, text=f"系统拒绝自动打开（{note}），这里是应用内目录列表。",
-                     font=F["small"], fg=C["faint"], bg=C["bg"],
-                     anchor="w", justify="left", wraplength=700,
-                     padx=16).pack(fill="x", pady=(6, 0))
-
-        # 工具栏
-        tools = tk.Frame(win, bg=C["bg"], padx=16, pady=8)
-        tools.pack(fill="x")
-
-        tree_wrap = tk.Frame(win, bg=C["card"], highlightthickness=1,
-                             highlightbackground=C["border"])
-        tree_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 8))
-
-        # 让 Treeview 融入整体配色（默认样式是系统灰白，很突兀）
-        style = ttk.Style(win)
-        style.configure("Folder.Treeview",
-                        background=C["card"], fieldbackground=C["card"],
-                        foreground=C["text"], borderwidth=0, relief="flat",
-                        rowheight=26, font=F["body"])
-        style.configure("Folder.Treeview.Heading",
-                        background=C["card"], foreground=C["muted"],
-                        borderwidth=0, relief="flat", font=F["small"], padding=(8, 6))
-        style.map("Folder.Treeview",
-                  background=[("selected", C["accent_soft"])],
-                  foreground=[("selected", C["accent"])])
-        style.map("Folder.Treeview.Heading", background=[("active", C["hover"])])
-        style.layout("Folder.Treeview", [
-            ("Folder.Treeview.treearea", {"sticky": "nswe"})
-        ])
-
-        columns = ("size", "mtime")
-        tree = ttk.Treeview(tree_wrap, columns=columns, show="tree headings",
-                            selectmode="browse", style="Folder.Treeview")
-        tree.heading("#0", text="名称", anchor="w")
-        tree.heading("size", text="大小", anchor="e")
-        tree.heading("mtime", text="修改时间", anchor="w")
-        tree.column("#0", width=440, anchor="w", stretch=True)
-        tree.column("size", width=96, anchor="e", stretch=False)
-        tree.column("mtime", width=150, anchor="w", stretch=False)
-        tree.pack(side="left", fill="both", expand=True)
-
-        vsb = ttk.Scrollbar(tree_wrap, orient="vertical", command=tree.yview)
-        vsb.pack(side="right", fill="y")
-        tree.configure(yscrollcommand=vsb.set)
-
-        # 状态行
-        info = tk.Label(win, text="", font=F["small"], fg=C["faint"],
-                        bg=C["bg"], anchor="w", padx=16)
-        info.pack(fill="x", pady=(0, 10))
-
-
-        def refresh() -> None:
-            tree.delete(*tree.get_children())
-            cur = state["dir"]
-            path_var.set(str(cur))
-            try:
-                entries = sorted(cur.iterdir(),
-                                 key=lambda x: (x.is_file(), x.name.lower()))
-            except OSError as e:
-                info.configure(text=f"无法读取目录: {e}")
-                return
-            dirs = files = 0
-            import datetime
-            for item in entries:
-                if item.name.startswith("."):
-                    continue
-                try:
-                    st = item.stat()
-                    ts = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
-                except OSError:
-                    ts, st = "", None
-                if item.is_dir():
-                    dirs += 1
-                    tree.insert("", "end", iid=str(item), text=f"📁  {item.name}",
-                                values=("<文件夹>", ts))
-                else:
-                    files += 1
-                    tree.insert("", "end", iid=str(item), text=f"📄  {item.name}",
-                                values=(fmt_size(st.st_size, space=True) if st else "", ts))
-            info.configure(text=f"{dirs} 个文件夹，{files} 个文件")
-
-        def open_selected(_event=None) -> None:
-            sel = tree.selection()
-            if not sel:
-                return
-            target = Path(sel[0])
-            if target.is_dir():
-                state["dir"] = target
-                refresh()
-                return
-            ok2, why = App._open_path(target)
-            if ok2:
-                self._log(f"已打开文件: {target.name}")
-            else:
-                # 文件也打不开时，至少把上级目录路径给用户
-                self._copy_path(target.parent)
-                messagebox.showinfo(
-                    "无法打开文件",
-                    f"系统拒绝打开这个文件（{why}）。\n\n"
-                    f"文件位置：\n{target}\n\n"
-                    f"所在目录路径已复制到剪贴板。",
-                )
-
-        def go_up() -> None:
-            parent = state["dir"].parent
-            if parent != state["dir"] and parent.exists():
-                state["dir"] = parent
-                refresh()
-
-        def copy_current() -> None:
-            self._copy_path(state["dir"])
-
-        def retry_system() -> None:
-            ok2, why = App._open_path(state["dir"])
-            if ok2:
-                info.configure(text="已在资源管理器中打开")
-            else:
-                info.configure(text=f"系统仍然拒绝打开：{why}")
-
-        FlatButton(tools, "上一级", go_up, compact=True).pack(side="left", padx=(0, 6))
-        FlatButton(tools, "刷新", refresh, compact=True).pack(side="left", padx=(0, 6))
-        FlatButton(tools, "复制路径", copy_current, compact=True).pack(side="left", padx=(0, 6))
-        FlatButton(tools, "用资源管理器打开", retry_system,
-                   compact=True).pack(side="left")
-
-        tree.bind("<Double-1>", open_selected)
-        tree.bind("<Return>", open_selected)
-
-        refresh()
-        win.focus_set()
 
     def _copy_path(self, path: Path) -> None:
         try:
