@@ -187,6 +187,18 @@ class App:
         # 处理中直接关窗会让进程退出、worker 可能写到一半（留下半截文件），
         # 所以关窗前先确认，并把取消信号发出去让 worker 尽快收尾。
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # GUI 由 启动.vbs 以隐藏窗口启动，没有控制台 —— Tk 回调里抛的异常
+        # 默认只会打印到 stderr（看不见），表现为"点了按钮没反应"。
+        # 接管后一律写进日志窗口，任何静默失败都能被看到。
+        self.root.report_callback_exception = self._report_callback_exception
+
+    def _report_callback_exception(self, exc_type, exc_value, exc_tb) -> None:
+        """把 Tk 回调里的未捕获异常显示到日志区（而不是丢进隐藏的 stderr）"""
+        import traceback
+        detail = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        self._log(f"[错误] 界面操作失败: {exc_type.__name__}: {exc_value}")
+        for line in detail.strip().splitlines()[-8:]:
+            self._log(f"    {line}")
 
     def _on_close(self):
         """关闭窗口：任务进行中先确认并请求取消"""
@@ -1006,8 +1018,16 @@ class App:
 
     @staticmethod
     def _open_path(path: Path):
-        """尝试用系统方式打开路径，返回 (是否成功, 失败原因说明)"""
-        path = Path(path).resolve()
+        """尝试用系统方式打开路径，返回 (是否成功, 失败原因说明)
+
+        注意：这里**不做 `Path.resolve()`**。改造前能正常打开的实现是直接把
+        用户填的路径字符串交给 `os.startfile`；`resolve()` 会把符号链接/短路径
+        展开成另一种写法，在个别环境下会让 shell 解析出不同结果。保持"原样
+        传递"最接近已验证可用的行为。
+        """
+        path = Path(path)
+        if not path.is_absolute():
+            path = path.absolute()
         p = str(path)
 
         if sys.platform == "win32":
@@ -1026,40 +1046,66 @@ class App:
 
     @staticmethod
     def _shell_open_windows(path_str: str):
-        """Windows：优先 ShellExecuteW，其次 os.startfile。
+        """Windows：用系统 shell 打开目录。
 
-        不用 Popen(["explorer", ...])：受限环境下 explorer.exe 会以
+        **第一优先必须是 `os.startfile`** —— 这正是本项目改造前的写法，
+        在用户机器上一直可用。不要为了"更底层"而换顺序：`ShellExecuteW`
+        在某些环境会返回成功（> 32）却实际没打开窗口，那样代码会误判成功
+        直接 return，用户看到的就是"点了没反应"（本次回归的原因）。
+
+        也绝不用 `Popen(["explorer", ...])`：受限环境下 explorer.exe 以
         0xc0000142 STATUS_DLL_INIT_FAILED 崩溃，Windows 弹出系统级
-        "应用程序无法正常启动"对话框，用户根本不知道哪来的。
-
-        ShellExecuteW 返回 > 32 表示成功；常见错误码：
-        2/3 = 找不到路径，5 = 拒绝访问，31 = 没有关联程序。
+        "应用程序无法正常启动"对话框，用户根本不知道哪来的（实测踩过）。
         """
         import ctypes
 
+        errors = []
+
+        # 1) os.startfile —— 与原实现一致，最可靠
+        try:
+            os.startfile(path_str)      # type: ignore[attr-defined]
+            return True, ""
+        except Exception as e:          # noqa: BLE001
+            errors.append(f"startfile: {type(e).__name__}: {e}")
+
+        # 2) ShellExecuteEx 兜底（os.startfile 内部走的也是它，但单独调用
+        #    能拿到 HRESULT/错误码，便于判断到底哪一步不成立）
         _ERROR_TEXT = {
             2: "找不到路径",
             3: "找不到路径",
             5: "拒绝访问（可能被安全软件或组策略拦截）",
             31: "没有可用于打开的程序",
         }
-
-        # 1) ShellExecuteW（让 shell 自己打开，不创建子进程）
         try:
+            class _SEI(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", ctypes.c_ulong), ("fMask", ctypes.c_ulong),
+                    ("hwnd", ctypes.c_void_p), ("lpVerb", ctypes.c_wchar_p),
+                    ("lpFile", ctypes.c_wchar_p), ("lpParameters", ctypes.c_wchar_p),
+                    ("lpDirectory", ctypes.c_wchar_p), ("nShow", ctypes.c_int),
+                    ("hInstApp", ctypes.c_void_p), ("lpIDList", ctypes.c_void_p),
+                    ("lpClass", ctypes.c_wchar_p), ("hkeyClass", ctypes.c_void_p),
+                    ("dwHotKey", ctypes.c_ulong), ("hIcon", ctypes.c_void_p),
+                    ("hProcess", ctypes.c_void_p),
+                ]
+
+            sei = _SEI()
+            sei.cbSize = ctypes.sizeof(_SEI)
+            sei.fMask = 0x00000040      # SEE_MASK_NOCLOSEPROCESS
+            sei.lpVerb = "open"
+            sei.lpFile = path_str
+            sei.nShow = 1               # SW_SHOWNORMAL
+            if ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(sei)):
+                return True, ""
             rc = ctypes.windll.shell32.ShellExecuteW(
-                None, "open", path_str, None, None, 1)   # SW_SHOWNORMAL
+                None, "open", path_str, None, None, 1)
             if rc > 32:
                 return True, ""
-            reason = _ERROR_TEXT.get(rc, f"ShellExecute 返回错误码 {rc}")
-        except Exception as e:      # noqa: BLE001
-            reason = f"ShellExecute 调用异常: {type(e).__name__}: {e}"
-
-        # 2) os.startfile 兜底
-        try:
-            os.startfile(path_str)     # type: ignore[attr-defined]
-            return True, ""
+            errors.append(_ERROR_TEXT.get(rc, f"ShellExecute 返回错误码 {rc}"))
         except Exception as e:          # noqa: BLE001
-            return False, f"{reason}；startfile: {type(e).__name__}: {e}"
+            errors.append(f"ShellExecute: {type(e).__name__}: {e}")
+
+        return False, "；".join(errors)
 
 
 def main():
