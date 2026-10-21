@@ -59,6 +59,8 @@ summarizer:
   timeout: 300
 translation:
   target_lang: zh
+  # 翻译的 token 预算。设太小会截断译文中途，导致行数不匹配而放弃翻译
+  max_tokens: 8192
 whisper:
   audio_format: wav
   beam_size: 5

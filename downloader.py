@@ -219,8 +219,8 @@ class Downloader:
         progress_hook 检查它并抛 _Aborted。绝不能共用一个实例 ——
         否则下一轮 clear() 会让上一轮残留的线程"复活"。
         """
-        retries: int = int(self.dl_config.get("retries") or 10)
-        fragment_retries: int = int(self.dl_config.get("fragment_retries") or 30)
+        retries: int = int(_num(self.dl_config.get("retries"), 10))
+        fragment_retries: int = int(_num(self.dl_config.get("fragment_retries"), 30))
         if retries_override is not None:
             retries = retries_override
             fragment_retries = min(fragment_retries, retries_override)
@@ -437,7 +437,7 @@ class Downloader:
             # 而换下一个编码/CDN 通常 10 秒就能下完。这里优先"快速换路"。
             per_candidate_retries = (PER_CANDIDATE_RETRIES
                                      if len(candidates) > 1
-                                     else int(self.dl_config.get("retries") or 10))
+                                     else int(_num(self.dl_config.get("retries"), 10)))
 
             for idx, fmt in enumerate(candidates, 1):
                 self._check_cancel()

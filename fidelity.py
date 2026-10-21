@@ -31,8 +31,9 @@ logger = logging.getLogger(__name__)
 
 # ── 归一化用的正则 ──
 # 抛光输入每行带 [MM:SS] 前缀，提示词要求输出时去掉，比对前也必须先去掉。
-# 分钟位写 1~3 位：`%02d` 产出 2 位，但超长视频拼接后可能出现 3 位。
-TIME_PREFIX_RE = re.compile(r"^\[\d{1,3}:\d{2}\]\s*", re.MULTILINE)
+# 分钟位不限位数：通常 `%02d` 产出 2 位，但超长视频（如 >16h40m 的直播/
+# 有声书）会出现 4 位（[1000:00]），写死位数会漏匹配。
+TIME_PREFIX_RE = re.compile(r"^\[\d+:\d{2}\]\s*", re.MULTILINE)
 # 归一化时去掉的标点 / 空白 / 格式标记（长度与相似度只看正文）
 _STRIP_RE = re.compile(
     r"[\s，。、；：？！“”‘’（）《》〈〉【】…—–\-·,.;:?!()\[\]{}<>\"'`~#*|/\\]"
@@ -56,13 +57,16 @@ class Thresholds:
     min_similarity: float = 0.90
     max_token_loss: float = 0.20
     long_token_min_len: int = 6
+    # 归一化后短于这个长度时，相似度判据改用更宽松的 short_text_min_similarity：
+    # difflib 对短文本极其敏感（29 字改 3 个字 = 0.897，会被 0.90 误判），
+    # 而 split_text 的最后一块可能很短，误杀会让该块退回未加标点的原文。
+    # 注意是"放宽"而不是"跳过"——完全跳过会放过中等长度（100~200 字）的改写。
+    similarity_min_chars: int = 200
+    short_text_min_similarity: float = 0.75
 
 
 # 抛光：同文只加标点/分段，归一化后应与原文几乎一致 → 要求高相似度
 POLISH = Thresholds()
-
-# 预留给"对总结正文做保真校验"的场景（总结是压缩改写，天然差异更大）
-SUMMARY = Thresholds(min_similarity=0.60, max_token_loss=0.50)
 
 
 def strip_time_prefix(text: str, *, drop_empty_lines: bool = False) -> str:
@@ -103,10 +107,12 @@ def fallback_text(src: str) -> str:
     return src
 
 
-def token_loss(src: str, out: str) -> Tuple[float, List[str]]:
+def token_loss(src: str, out: str,
+               long_min_len: int = 6) -> Tuple[float, List[str]]:
     """统计英文词 / 数字的丢失情况，返回 (丢失比例, 丢失的长英文词列表)。
 
-    英文词不区分大小写；长英文词（长度 >= 6）丢失往往意味着整段被截断或漏译。
+    英文词不区分大小写；长英文词（长度 >= `long_min_len`）丢失往往意味着
+    整段被截断或漏译。
     """
     src_words: Set[str] = {w.lower() for w in _EN_WORD_RE.findall(src)}
     out_words: Set[str] = {w.lower() for w in _EN_WORD_RE.findall(out)}
@@ -120,7 +126,7 @@ def token_loss(src: str, out: str) -> Tuple[float, List[str]]:
     lost_words = sorted(w for w in src_words if w not in out_words)
     lost_nums = sorted(n for n in src_nums if n not in out_nums)
     lost_ratio = (len(lost_words) + len(lost_nums)) / total
-    long_lost = [w for w in lost_words if len(w) >= 6]
+    long_lost = [w for w in lost_words if len(w) >= long_min_len]
     return lost_ratio, long_lost
 
 
@@ -128,10 +134,11 @@ def verify(src: str, out: str, label: str = "抛光",
            thresholds: Thresholds = POLISH) -> str:
     """校验 `out` 是否忠实于 `src`；不达标则回退原文并告警。
 
-    通过校验时**原样返回模型输出**，绝不改动它的合法产物
-    （否则多说话人模式的「说话人A：」标注会被守卫吃掉）。
+    通过校验时**返回模型输出本身**（不改写、不重排，多说话人模式合法新增的
+    「说话人A：」标签会保留），仅额外剥掉模型偶尔忘记去掉的行首 [MM:SS]——
+    否则时间戳会混进转写正文。
 
-    比对时剔除模型合法新增的说话人标签，避免多说话人模式误报。
+    比对时剔除说话人标签，避免多说话人模式误报。
     """
     raw_out = out or ""
     compared = strip_speaker_labels(raw_out)
@@ -155,17 +162,21 @@ def verify(src: str, out: str, label: str = "抛光",
         )
         return fallback_text(src)
 
-    similarity = difflib.SequenceMatcher(None, norm_src, norm_out, autojunk=False).ratio()
-    if similarity < thresholds.min_similarity:
+    # 相似度判据按文本长度取不同阈值：短文本用宽容值（见 Thresholds 注释）
+    min_similarity = (thresholds.min_similarity
+                      if len(norm_src) >= thresholds.similarity_min_chars
+                      else thresholds.short_text_min_similarity)
+    similarity = difflib.SequenceMatcher(
+        None, norm_src, norm_out, autojunk=False).ratio()
+    if similarity < min_similarity:
         logger.warning(
             "%s：输出与原文相似度过低（%.2f < %.2f），疑似改写/截断，已回退原文",
-            label, similarity, thresholds.min_similarity,
+            label, similarity, min_similarity,
         )
         return fallback_text(src)
 
-    lost_ratio, long_lost = token_loss(body, compared)
-    if thresholds.long_token_min_len > 0:
-        long_lost = [w for w in long_lost if len(w) >= thresholds.long_token_min_len]
+    lost_ratio, long_lost = token_loss(body, compared,
+                                       thresholds.long_token_min_len)
     if long_lost:
         logger.warning(
             "%s：输出丢失英文词 %s，疑似漏段/截断，已回退原文",

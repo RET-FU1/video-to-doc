@@ -185,7 +185,7 @@ output/
 | 风格 | 参数 | 说明 |
 |------|------|------|
 | 全面总结 | `auto` | 精炼文章式：核心观点 → 论证展开 → 关键收获（默认） |
-| 知识点提取 | `knowledge_points` | 结构化列出全部知识点，含概念解释、重要性说明、原文例子 |
+| 知识点 | `knowledge_points` | 结构化列出全部知识点，含概念解释、重要性说明、原文例子 |
 | 操作步骤 | `steps` | 按顺序拆解步骤：做什么、为什么必要、怎么做、常见坑点 |
 | 核心观点 | `core_ideas` | 洞察提炼：拒绝话题罗列，每条都是让人「原来如此」的观点 |
 | 专家深度 | `expert` | 世界级专家视角，自我核查事实，锐利批判思维 |
@@ -240,6 +240,7 @@ output/
 | `summarizer.multi_speaker` | 多说话人识别 | `false` |
 | `summarizer.output_formats` | 输出格式 | `[md]` |
 | `translation.target_lang` | 翻译目标语言 | `zh` |
+| `translation.max_tokens` | 翻译的 token 预算（过小会截断译文导致放弃翻译） | `8192` |
 | `subtitles.enabled` | 优先提取视频平台字幕 | `true` |
 | `subtitles.languages` | 字幕语言优先级 | `[zh, zh-Hans, zh-Hant, en]` |
 | `subtitles.prefer_manual` | 优先人工字幕 | `true` |

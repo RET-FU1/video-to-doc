@@ -14,6 +14,7 @@ from transcriber import Transcriber
 from summarizer import create_summarizer
 from format_converter import save_formats
 from fidelity import POLISH, normalize, strip_time_prefix, verify
+from translator import DEFAULT_MAX_TOKENS as TRANSLATION_DEFAULT_MAX_TOKENS
 # STYLE_CN 在此再导出：外部代码与测试沿用 `from pipeline import STYLE_CN`
 from styles import STYLE_CN, STYLE_PREFIXES, DEFAULT_STYLE, label_of  # noqa: F401
 from utils import (get_state, set_state, split_text, MEDIA_EXTS,
@@ -72,9 +73,10 @@ class Pipeline:
                 client=self.summarizer.client,
                 model=t_config.get("model", "") or self.summarizer.model,
                 target_lang=t_config.get("target_lang", "zh"),
-                # 翻译同样受 token 预算限制：沿用 summarizer.max_tokens，
-                # 而不是在 translator 里写死一个与配置无关的数字
-                max_tokens=int(self.config.get("summarizer", {}).get("max_tokens") or 8192),
+                # 翻译有独立的 token 预算（config: translation.max_tokens）。
+                # 不沿用 summarizer.max_tokens：总结预算被调小时会截断翻译，
+                # 导致行数不匹配 → 翻译被静默放弃。
+                max_tokens=int(t_config.get("max_tokens") or TRANSLATION_DEFAULT_MAX_TOKENS),
             )
         return self._translator
 
@@ -502,16 +504,6 @@ class Pipeline:
         最后整篇被回退"的诡异现象。现在统一走 fidelity.verify(POLISH)。
         """
         return verify(source, polished, label="抛光", thresholds=POLISH)
-        ratio = len(norm_out) / len(norm_src)
-        if not 0.85 <= ratio <= 1.25:
-            logger.warning("抛光结果长度异常（原文 %d 字 → %d 字，%.0f%%），回退原文",
-                           len(norm_src), len(norm_out), ratio * 100)
-            return body
-        sim = difflib.SequenceMatcher(None, norm_src, norm_out, autojunk=False).ratio()
-        if sim < 0.90:
-            logger.warning("抛光结果与原文相似度过低（%.2f），回退原文", sim)
-            return body
-        return polished
 
     # ------------------------------------------------------------------
     # 翻译

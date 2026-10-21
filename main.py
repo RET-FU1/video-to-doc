@@ -14,13 +14,9 @@ Video-to-Doc — 视频下载、转写、总结一体化工具
   python main.py <视频URL> --device cpu            覆盖 whisper.device
   python main.py --folder <文件夹路径>             批量处理文件夹内所有视频/音频
 
-总结风格:
-  auto             全面总结（默认）
-  knowledge_points 提取知识点
-  steps            提取操作步骤
-  core_ideas       提炼核心观点
-  expert           专家深度分析
-  custom           自定义提示词
+总结风格（完整列表见 styles.py，此处不重复列举，避免加风格时漏改）:
+  python main.py <视频URL> --summary-styles steps,expert
+  python main.py --help 可查看当前支持的全部风格
 """
 import sys
 from pathlib import Path
@@ -40,6 +36,7 @@ from typing import Dict, Any
 
 import yaml
 from pipeline import Pipeline
+from styles import DEFAULT_STYLE, STYLE_KEYS
 from utils import CancelledError, setup_logging, validate_config
 
 logger = logging.getLogger(__name__)
@@ -209,8 +206,9 @@ def main() -> None:
     parser.add_argument("--playlist", action="store_true", help="以播放列表模式下载")
     parser.add_argument("--folder", default=None, help="批量处理文件夹内所有视频")
     parser.add_argument("--download-only", action="store_true", help="仅下载视频，不做转写和总结")
-    parser.add_argument("--summary-styles", default="auto",
-                        help="总结风格，逗号分隔: auto,knowledge_points,steps,core_ideas,expert,custom (默认: auto)")
+    parser.add_argument("--summary-styles", default=DEFAULT_STYLE,
+                        help=f"总结风格，逗号分隔: {','.join(STYLE_KEYS)} "
+                             f"(默认: {DEFAULT_STYLE})")
     parser.add_argument("--output-formats", default="md",
                         help="输出格式，逗号分隔: md,txt,html (默认: md)")
     parser.add_argument("--multi-speaker", action="store_true",

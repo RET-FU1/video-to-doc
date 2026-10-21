@@ -347,6 +347,12 @@ def validate_config(config: dict) -> List[str]:
         if not isinstance(max_tok, (int, float)) or max_tok < 256:
             errors.append("summarizer.max_tokens 值无效，应为 >= 256 的整数")
 
+    tr = config.get("translation", {})
+    if isinstance(tr, dict):
+        tr_max = tr.get("max_tokens")
+        if tr_max is not None and (not isinstance(tr_max, (int, float)) or tr_max < 1024):
+            errors.append("translation.max_tokens 值无效，应 >= 1024"
+                          "（过小会截断译文，导致翻译被放弃）")
     dl = config.get("downloader", {})
     if isinstance(dl, dict):
         timeout = dl.get("timeout", 7200)

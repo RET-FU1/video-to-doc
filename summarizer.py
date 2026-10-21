@@ -147,11 +147,14 @@ class OpenAICompatSummarizer:
 
     # 提示词必须覆盖 styles.py 里所有"有内置提示词"的风格，
     # 否则新增风格后会静默回退到默认提示词，产物内容与名字不符。
+    # 这里只记日志、不 raise：GUI 由 .vbs 无控制台启动，导入期抛异常
+    # 用户只会看到"程序打不开"，反而更难排查；真正的把关交给
+    # tests/test_styles.py（CI/本地跑测试时必然发现）。
     _missing_prompts = set(BUILTIN_STYLE_KEYS) - set(STYLE_PROMPTS)
     if _missing_prompts:
-        raise RuntimeError(
-            f"styles.py 定义了内置风格 {sorted(_missing_prompts)}，"
-            f"但 summarizer.STYLE_PROMPTS 缺少对应提示词")
+        logging.getLogger(__name__).error(
+            "styles.py 定义了内置风格 %s，但 STYLE_PROMPTS 缺少对应提示词；"
+            "这些风格会回退到 %s 的提示词", sorted(_missing_prompts), DEFAULT_STYLE)
 
     def __init__(self, config: Dict[str, Any]) -> None:
         import os

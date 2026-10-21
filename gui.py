@@ -495,7 +495,7 @@ class App:
         if self.playlist_var.get():
             self.folder_var.set(False)
             self.folder_chip.set_enabled(False)
-            self.folder_chip._refresh()
+            self.folder_chip.refresh()
         else:
             self.folder_chip.set_enabled(True)
 
@@ -504,9 +504,9 @@ class App:
         if self.folder_var.get():
             self.playlist_var.set(False)
             self.playlist_chip.set_enabled(False)
-            self.playlist_chip._refresh()
+            self.playlist_chip.refresh()
             self.dlonly_var.set(False)
-            self.dlonly_chip._refresh()
+            self.dlonly_chip.refresh()
             self._on_dlonly_toggle()
         else:
             self.playlist_chip.set_enabled(True)
@@ -516,7 +516,7 @@ class App:
         dlonly = self.dlonly_var.get()
         if dlonly:
             self.folder_var.set(False)
-            self.folder_chip._refresh()
+            self.folder_chip.refresh()
         for chip in (self.multi_speaker_chip, self.translate_chip,
                      self.srt_chip, self.nosummary_chip,
                      *self.fmt_chips, *self._style_chips.values()):
@@ -669,7 +669,7 @@ class App:
     def _run(self, urls, cancel_token, job):
         """worker 线程：只使用 job 里快照好的普通值，不碰任何 tkinter 对象"""
         formats = job["formats"]
-        selected_styles = job["styles"] or ["auto"]
+        selected_styles = job["styles"] or [DEFAULT_STYLE]
 
         handler = _GuiLogHandler(self)
         handler.setFormatter(logging.Formatter("%(message)s"))

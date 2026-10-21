@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 
-import styles
 from styles import (STYLES, STYLE_CN, STYLE_KEYS, BUILTIN_STYLE_KEYS,
                     STYLE_PREFIXES, DEFAULT_STYLE, label_of)
 
@@ -74,11 +73,30 @@ class TestReadmeInSync:
 
     README = PROJECT_ROOT / "README.md"
 
-    def test_readme_lists_every_style(self):
-        text = self.README.read_text(encoding="utf-8")
-        for s in STYLES:
-            assert s.label in text, f"README 缺少风格中文名: {s.label}"
-            assert s.key in text, f"README 缺少风格参数名: {s.key}"
+    @staticmethod
+    def _readme_table_rows() -> list:
+        """解析 README 里风格表格的数据行，返回 [(中文名, 参数名), ...]
+
+        用子串断言会出现假绿：代码是「知识点」而文档写「知识点提取」时，
+        `"知识点" in text` 仍然成立。必须逐行精确比对。
+        """
+        text = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        rows = []
+        for line in text.splitlines():
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) >= 2 and cells[1].startswith("`") and cells[1].endswith("`"):
+                key = cells[1].strip("`")
+                if key in STYLE_KEYS:
+                    rows.append((cells[0], key))
+        return rows
+
+    def test_readme_table_matches_code_exactly(self):
+        rows = self._readme_table_rows()
+        assert rows, "README 里没有解析到风格表格"
+        expected = [(s.label, s.key) for s in STYLES]
+        assert rows == expected, (
+            f"README 风格表格与 styles.py 不一致\n"
+            f"  文档: {rows}\n  代码: {expected}")
 
     def test_readme_style_count(self):
         text = self.README.read_text(encoding="utf-8")

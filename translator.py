@@ -19,6 +19,12 @@ _LANG_NAMES = {
 # 模型偶尔会给输出加编号（"1. xxx" / "1、xxx"），剥掉以还原纯译文
 _NUMBERING_RE = re.compile(r"^\s*\d+\s*[.、)．]\s*")
 
+# 翻译的默认 token 预算。
+# 不沿用 summarizer.max_tokens：后者被调小（如 512）时，按行翻译会被截断，
+# 行数不匹配 → 翻译被静默放弃，用户会以为"翻译功能坏了"。
+# 需要更省的可以在 config 里设 translation.max_tokens。
+DEFAULT_MAX_TOKENS = 8192
+
 
 class TranslationLineCountError(ValueError):
     """翻译结果行数与原文不一致。
@@ -51,7 +57,7 @@ class Translator:
 
     def __init__(self, client, model: str, target_lang: str = "zh",
                  max_lines_per_chunk: int = 80, timeout: float = 120,
-                 max_tokens: int = 8192) -> None:
+                 max_tokens: int = DEFAULT_MAX_TOKENS) -> None:
         self.client = client
         self.model = model
         self.target_lang = target_lang

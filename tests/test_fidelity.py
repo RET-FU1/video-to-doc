@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import fidelity
-from fidelity import (POLISH, SUMMARY, Thresholds, fallback_text, normalize,
+from fidelity import (POLISH, Thresholds, fallback_text, normalize,
                       strip_speaker_labels, strip_time_prefix, token_loss, verify)
 
 
@@ -96,9 +96,11 @@ class TestVerifyRejects:
 
 
 class TestThresholds:
-    def test_summary_more_lenient_than_polish(self):
-        assert SUMMARY.min_similarity < POLISH.min_similarity
-        assert SUMMARY.max_token_loss > POLISH.max_token_loss
+    def test_polish_preset_values(self):
+        assert POLISH.min_ratio == 0.85
+        assert POLISH.max_ratio == 1.25
+        assert POLISH.min_similarity == 0.90
+        assert POLISH.max_token_loss == 0.20
 
     def test_custom_thresholds_respected(self):
         src = "正常内容。" * 100
@@ -131,3 +133,34 @@ class TestSuccessPathCleanup:
         src = "今天天气不错" * 20
         out = "说话人A：" + src
         assert verify(src, out).startswith("说话人A：")
+
+
+class TestShortChunkTolerance:
+    """相似度对短文本极敏感（29 字改 3 个字≈0.897），
+    而 split_text 的最后一块可能很短，误杀会让该块退回未加标点的原文。"""
+
+    def test_short_chunk_passes_despite_low_similarity(self):
+        src = "摄影是光的艺术这个观点在今天的讨论中反复提到并展开论证"
+        out = "摄影属于光线的艺术，这个观点今天被反复提到并展开论证。"
+        assert len(src) < POLISH.similarity_min_chars
+        assert verify(src, out) == out, "短块不应触发相似度回退"
+
+    def test_short_chunk_still_checks_length(self):
+        """短块跳过相似度，但长度比与 token 丢失仍然生效"""
+        src = "这是一段短文本内容"
+        assert verify(src, "完全不同的另一段内容在这里") == src
+
+    def test_long_chunk_similarity_still_enforced(self):
+        src = "摄影是光的艺术。" * 50
+        out = "摄影属于光线艺术。" * 50
+        assert len(normalize(src)) >= POLISH.similarity_min_chars
+        assert verify(src, out) == src, "长文本改写仍应回退"
+
+
+class TestLongMinuteValues:
+    def test_four_digit_minutes(self):
+        """>16h40m 的直播/有声书会出现 [1000:00]"""
+        assert strip_time_prefix("[1000:00] 内容") == "内容"
+
+    def test_one_digit_minutes(self):
+        assert strip_time_prefix("[5:03] 内容") == "内容"

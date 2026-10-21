@@ -10,6 +10,7 @@ import datetime
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
+import os
 from typing import Callable, List, Optional, Tuple
 
 from ui_theme import C, F
@@ -138,7 +139,8 @@ class FolderBrowser(tk.Toplevel):
 
     # ---- 行为 ----
 
-    def _list_entries(self) -> Optional[List[Tuple[Path, object]]]:
+    def _list_entries(self) -> Optional[List[Tuple[Path,
+                                                    Optional[os.stat_result], str]]]:
         try:
             items = sorted(self._dir.iterdir(),
                            key=lambda x: (x.is_file(), x.name.lower()))

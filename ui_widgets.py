@@ -60,6 +60,10 @@ class Chip(tk.Label):
                            highlightbackground=C["border_2"],
                            highlightcolor=C["border_2"])
 
+    def refresh(self) -> None:
+        """按当前变量值重绘（外部改完 BooleanVar 后调用）"""
+        self._refresh()
+
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = bool(enabled)
         self.configure(cursor="hand2" if enabled else "arrow")

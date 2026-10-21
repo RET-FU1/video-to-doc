@@ -10,9 +10,11 @@
 加一种风格要改 4 个文件，漏一个就会出现「界面能选但产物命名对不上」或者
 「README 写了但程序不认」这类问题。现在统一到这里，其余地方只做引用：
 
-  - pipeline / summarizer：`from styles import STYLE_CN, STYLE_KEYS`
-  - gui：`from styles import STYLES` 直接遍历生成 chip
-  - README：由 `tests/test_styles.py` 断言表格与代码一致（防止再次漂移）
+  - pipeline：`from styles import STYLE_CN, STYLE_PREFIXES, label_of`
+  - summarizer：`from styles import BUILTIN_STYLE_KEYS, DEFAULT_STYLE`
+  - gui：`from styles import STYLES, DEFAULT_STYLE`，遍历 STYLES 生成 chip
+  - main（CLI）：`STYLE_KEYS` 生成 `--summary-styles` 的候选列表
+  - README：由 `tests/test_styles.py` 逐行精确比对表格（防止再次漂移）
 """
 from typing import Dict, List, NamedTuple
 
@@ -22,23 +24,16 @@ class Style(NamedTuple):
 
     key: str          # 配置/CLI 里用的标识
     label: str        # 中文名，同时作为产物文件名前缀
-    desc: str         # 一句话说明（README / 提示用）
     builtin: bool     # 是否有内置提示词（custom 走用户自定义提示词）
 
 
 STYLES: List[Style] = [
-    Style("auto", "全面总结",
-          "精炼文章式：核心观点 → 论证展开 → 关键收获（默认）", True),
-    Style("knowledge_points", "知识点",
-          "结构化列出全部知识点，含概念解释、重要性说明、原文例子", True),
-    Style("steps", "操作步骤",
-          "按顺序拆解步骤：做什么、为什么必要、怎么做、常见坑点", True),
-    Style("core_ideas", "核心观点",
-          "洞察提炼：拒绝话题罗列，每条都是让人「原来如此」的观点", True),
-    Style("expert", "专家深度",
-          "世界级专家视角，自我核查事实，锐利批判思维", True),
-    Style("custom", "自定义",
-          "不走内置提示词，改用 `summarizer.custom_prompt` 中的内容", False),
+    Style("auto", "全面总结", True),
+    Style("knowledge_points", "知识点", True),
+    Style("steps", "操作步骤", True),
+    Style("core_ideas", "核心观点", True),
+    Style("expert", "专家深度", True),
+    Style("custom", "自定义", False),      # 提示词来自 summarizer.custom_prompt
 ]
 
 # key → 中文名（产物命名用）
