@@ -14,10 +14,9 @@ from pathlib import Path
 
 # 自动重定向到项目虚拟环境
 _PROJECT_ROOT = Path(__file__).parent
-_VENV_PYTHON = (_PROJECT_ROOT / "venv" / "Scripts" / "python.exe"
-                if sys.platform == "win32"
-                else _PROJECT_ROOT / "venv" / "bin" / "python")
-if _VENV_PYTHON.exists() and _VENV_PYTHON.resolve() != Path(sys.executable).resolve():
+_VENV_DIR = _PROJECT_ROOT / "venv" / ("Scripts" if sys.platform == "win32" else "bin")
+_VENV_PYTHON = _VENV_DIR / ("python.exe" if sys.platform == "win32" else "python")
+if _VENV_PYTHON.exists() and Path(sys.executable).resolve().parent != _VENV_DIR.resolve():
     import subprocess
     sys.exit(subprocess.run([str(_VENV_PYTHON), __file__] + sys.argv[1:]).returncode)
 
@@ -836,8 +835,21 @@ class App:
             self._set_status("已打开输出目录")
             return
 
-        # 系统方式全部失败：不给用户看死路，直接打开应用内浏览器
+        # 系统方式全部失败：先做一次环境自检（判断是"只有这个目录"还是
+        # "整个 shell 都打不开"），再给用户可用的应用内列表。
         self._log(f"[WARN] 系统拒绝打开目录（{reason}），改用应用内目录列表")
+        self._log("[诊断] 打开目录环境自检（无弹窗）：")
+        probe = self._probe_open_env(output_dir)
+        only_this = any(ok_ for label, ok_, _e in probe if label != "输出目录")
+        for label, ok_, err in probe:
+            mark = "成功" if ok_ else f"失败（{err}）"
+            self._log(f"    {label}: {mark}")
+        if only_this:
+            self._log("    → 其他目录可正常打开，说明是**该输出目录本身的权限/属性**问题")
+        else:
+            self._log("    → 所有目录都无法用系统方式打开，说明是**系统的 shell / "
+                      "文件关联 / 安全软件**层面的问题，与本程序无关")
+
         self._set_status("已打开目录列表")
         self._show_folder_window(output_dir, note=reason)
 
@@ -1044,68 +1056,115 @@ class App:
         except Exception as e:      # noqa: BLE001
             return False, f"{type(e).__name__}: {e}"
 
+    # ---- Windows 打开目录：ShellExecuteEx（不带 UI，失败不弹系统框）----
+
     @staticmethod
-    def _shell_open_windows(path_str: str):
-        """Windows：用系统 shell 打开目录。
+    def _shell_execute_ex(path_str: str, verb: "str | None" = None) -> "tuple[bool, int]":
+        """调用 ShellExecuteExW，返回 (是否成功, 错误码)。
 
-        **第一优先必须是 `os.startfile`** —— 这正是本项目改造前的写法，
-        在用户机器上一直可用。不要为了"更底层"而换顺序：`ShellExecuteW`
-        在某些环境会返回成功（> 32）却实际没打开窗口，那样代码会误判成功
-        直接 return，用户看到的就是"点了没反应"（本次回归的原因）。
-
-        也绝不用 `Popen(["explorer", ...])`：受限环境下 explorer.exe 以
-        0xc0000142 STATUS_DLL_INIT_FAILED 崩溃，Windows 弹出系统级
-        "应用程序无法正常启动"对话框，用户根本不知道哪来的（实测踩过）。
+        相比 `os.startfile`，这里加了 `SEE_MASK_FLAG_NO_UI`：失败时**不会**
+        弹 Windows 的「无法访问指定设备、路径或文件」系统对话框，而是把手
+        交给我们自己处理（记录原因 + 回退到应用内浏览器）。verb=None 表示
+        用系统默认动作，和 `os.startfile` 行为一致。
         """
         import ctypes
 
-        errors = []
+        class _SEI(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_ulong), ("fMask", ctypes.c_ulong),
+                ("hwnd", ctypes.c_void_p), ("lpVerb", ctypes.c_wchar_p),
+                ("lpFile", ctypes.c_wchar_p), ("lpParameters", ctypes.c_wchar_p),
+                ("lpDirectory", ctypes.c_wchar_p), ("nShow", ctypes.c_int),
+                ("hInstApp", ctypes.c_void_p), ("lpIDList", ctypes.c_void_p),
+                ("lpClass", ctypes.c_wchar_p), ("hkeyClass", ctypes.c_void_p),
+                ("dwHotKey", ctypes.c_ulong), ("hIcon", ctypes.c_void_p),
+                ("hProcess", ctypes.c_void_p),
+            ]
 
-        # 1) os.startfile —— 与原实现一致，最可靠
+        SEE_MASK_NOCLOSEPROCESS = 0x00000040
+        SEE_MASK_FLAG_NO_UI = 0x00000400
+        SEE_MASK_INVOKEIDLIST = 0x0000000C
+
+        sei = _SEI()
+        sei.cbSize = ctypes.sizeof(_SEI)
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI | SEE_MASK_INVOKEIDLIST
+        sei.lpVerb = verb
+        sei.lpFile = path_str
+        sei.nShow = 1                       # SW_SHOWNORMAL
         try:
-            os.startfile(path_str)      # type: ignore[attr-defined]
-            return True, ""
-        except Exception as e:          # noqa: BLE001
-            errors.append(f"startfile: {type(e).__name__}: {e}")
+            # 必须用 use_last_error=True 才能可靠读回错误码，
+            # 否则 ctypes.get_last_error() 恒为 0，诊断信息毫无意义。
+            shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+            shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(_SEI)]
+            shell32.ShellExecuteExW.restype = ctypes.c_bool
+            ok = shell32.ShellExecuteExW(ctypes.byref(sei))
+            err = 0 if ok else ctypes.get_last_error()
+        except Exception:                   # noqa: BLE001
+            return False, -1
+        if sei.hProcess:
+            try:
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+                kernel32.CloseHandle(ctypes.c_void_p(sei.hProcess))
+            except Exception:               # noqa: BLE001
+                pass
+        return ok, err
 
-        # 2) ShellExecuteEx 兜底（os.startfile 内部走的也是它，但单独调用
-        #    能拿到 HRESULT/错误码，便于判断到底哪一步不成立）
+    @staticmethod
+    def _shell_open_windows(path_str: str):
+        """Windows：打开目录，失败时返回可读原因。
+
+        依次尝试（全部用 ShellExecuteExW + 不弹 UI）：
+          1. 默认动作（等价于原实现的 os.startfile）
+          2. 显式 "open"      —— 某些Association 缺失时默认动作找不到，指定动词反而能成
+          3. 显式 "explore"   —— 目录专用动词
+
+        **绝不 `Popen(["explorer", ...])`**：受限环境下 explorer.exe 会以
+        0xc0000142 STATUS_DLL_INIT_FAILED 崩溃并弹系统级报错框（实测踩过）。
+
+        注意：不要用 `ShellExecuteW`（老 API）作为判断依据 —— 它在某些环境
+        返回 >32 的"成功"值却没有真正打开窗口，会让我们误判成功。
+        """
         _ERROR_TEXT = {
+            0: "系统未返回错误码",
             2: "找不到路径",
             3: "找不到路径",
-            5: "拒绝访问（可能被安全软件或组策略拦截）",
+            5: "拒绝访问",
             31: "没有可用于打开的程序",
         }
-        try:
-            class _SEI(ctypes.Structure):
-                _fields_ = [
-                    ("cbSize", ctypes.c_ulong), ("fMask", ctypes.c_ulong),
-                    ("hwnd", ctypes.c_void_p), ("lpVerb", ctypes.c_wchar_p),
-                    ("lpFile", ctypes.c_wchar_p), ("lpParameters", ctypes.c_wchar_p),
-                    ("lpDirectory", ctypes.c_wchar_p), ("nShow", ctypes.c_int),
-                    ("hInstApp", ctypes.c_void_p), ("lpIDList", ctypes.c_void_p),
-                    ("lpClass", ctypes.c_wchar_p), ("hkeyClass", ctypes.c_void_p),
-                    ("dwHotKey", ctypes.c_ulong), ("hIcon", ctypes.c_void_p),
-                    ("hProcess", ctypes.c_void_p),
-                ]
 
-            sei = _SEI()
-            sei.cbSize = ctypes.sizeof(_SEI)
-            sei.fMask = 0x00000040      # SEE_MASK_NOCLOSEPROCESS
-            sei.lpVerb = "open"
-            sei.lpFile = path_str
-            sei.nShow = 1               # SW_SHOWNORMAL
-            if ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(sei)):
+        errors = []
+        for verb, label in ((None, "默认动作"), ("open", "open"), ("explore", "explore")):
+            ok, err = App._shell_execute_ex(path_str, verb)
+            if ok:
                 return True, ""
-            rc = ctypes.windll.shell32.ShellExecuteW(
-                None, "open", path_str, None, None, 1)
-            if rc > 32:
-                return True, ""
-            errors.append(_ERROR_TEXT.get(rc, f"ShellExecute 返回错误码 {rc}"))
-        except Exception as e:          # noqa: BLE001
-            errors.append(f"ShellExecute: {type(e).__name__}: {e}")
+            errors.append(f"{label}→{_ERROR_TEXT.get(err, f'错误码 {err}')}")
 
         return False, "；".join(errors)
+
+    @staticmethod
+    def _probe_open_env(target: Path) -> "list[tuple[str, bool, str]]":
+        """诊断：分别尝试打开几个代表性路径，用于判断「只有这个目录不行」
+        还是「整个系统的 shell 都打不开」。全部走无 UI 调用，不弹框。"""
+        import tempfile
+        candidates = [
+            ("输出目录", target),
+            ("项目目录", PROJECT_ROOT),
+            ("用户临时目录", Path(tempfile.gettempdir())),
+            ("C:\\Windows", Path("C:\\Windows")),
+        ]
+        results = []
+        for label, path in candidates:
+            try:
+                exists = Path(path).exists()
+            except OSError:
+                exists = False
+            if not exists:
+                results.append((label, False, "路径不存在"))
+                continue
+            ok, err = App._shell_execute_ex(str(path), None)
+            results.append((label, ok, "" if ok else f"错误码 {err}"))
+        return results
 
 
 def main():

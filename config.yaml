@@ -8,13 +8,18 @@ downloader:
   retries: 30
   socket_timeout: 60
   timeout: 7200
-  # ── 慢节点自动换路 ──
-  # B站 每次取元信息都会随机分配 CDN 节点，实测同一视频不同节点速度能差 6 倍
-  # （429KB/s ~ 2722KB/s）。抽到慢节点时会主动放弃该节点、重新取地址换节点重试。
-  slow_node_retries: 3           # 最多重取几次元信息换节点（1 = 关闭换节点重试）
-  slow_node_min_speed_kb: 300    # 低于此速度视为慢节点（0 = 关闭慢节点检测）
-  slow_node_min_bytes_mb: 8      # 已下载不足此大小不判定（避免误杀小文件/结尾段）
-  slow_node_min_samples: 5       # 连续多少个采样点（约等于秒）都慢才判定
+  # ── 慢节点自动换路（默认关闭）──
+  # B站 每次取元信息会随机分配 CDN 节点，不同节点速度可能差几倍。
+  # 开启后：速度持续低于阈值 → 放弃当前节点、重新取地址从头下载。
+  # 注意：这会**丢弃已下载的进度**。如果你的网络速度本来就在 200~400KB/s
+  # 之间，开启它会导致反复重下、反而更慢，所以默认关闭。
+  # 只有在"偶尔抽到几乎不动的死节点"时才建议打开，例如：
+  #     slow_node_min_speed_kb: 60
+  #     slow_node_min_samples: 10
+  slow_node_retries: 3           # 最多重取几次元信息换节点
+  slow_node_min_speed_kb: 0      # 0 = 关闭慢节点检测（推荐保持 0）
+  slow_node_min_bytes_mb: 8      # 已下载不足此大小不判定
+  slow_node_min_samples: 5       # 连续多少个采样点都慢才判定
 output_dir: ./output
 subtitles:
   auto_subtitle:

@@ -275,6 +275,8 @@ class Downloader:
         status = d.get("status", "")
         if status == "downloading":
             self._downloaded_bytes = d.get("downloaded_bytes") or 0
+            self._total_bytes = (d.get("total_bytes")
+                                 or d.get("total_bytes_estimate") or 0)
             now = time.time()
             if now - self._last_progress_log < 10:
                 return
@@ -385,6 +387,7 @@ class Downloader:
         # 每次尝试都重置采样状态：上一轮的字节数/速度不能带进本轮，
         # 否则 delta 会算出错误的（甚至负的）瞬时速度
         self._downloaded_bytes = 0
+        self._total_bytes = 0
         self._speed_samples = []
         self._last_speed_bytes = 0
         self._last_speed_at = time.time()
@@ -454,6 +457,11 @@ class Downloader:
             self._speed_samples.pop(0)
 
         if downloaded < min_bytes or len(self._speed_samples) < min_samples:
+            return
+        # 已经下过半了就别再中断：换节点要**从头**下载，此时打断只会更慢
+        # （"速度一般但能下完"的情况被反复重来，用户感知就是"极其慢"）。
+        total = getattr(self, "_total_bytes", 0)
+        if total and downloaded / total >= 0.5:
             return
         if all(s < min_speed for s in self._speed_samples):
             avg = sum(self._speed_samples) / len(self._speed_samples)
