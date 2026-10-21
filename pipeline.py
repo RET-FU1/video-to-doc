@@ -94,10 +94,13 @@ class Pipeline:
         self._check_cancel()
         if is_playlist:
             logger.info("[仅下载 - 播放列表]")
-            results = self.downloader.download_playlist(url)
-            logger.info("下载完成! 共 %d 个视频", len(results))
-            for video_path, meta in results:
+            playlist = self.downloader.download_playlist(url)
+            logger.info("下载完成! 共 %d 个视频", len(playlist.items))
+            for video_path, _meta in playlist.items:
                 logger.info("  %s", video_path)
+            self.last_failures = playlist.failed
+            if playlist.failed:
+                logger.warning("其中 %d 个条目下载失败（见上方 [SKIP]）", playlist.failed)
             return
 
         logger.info("[仅下载]")
@@ -585,12 +588,13 @@ class Pipeline:
 
         失败数通过 `self.last_failures` 上报（GUI 用来显示"完成（N 个失败）"），
         不能让单个条目失败后仍然只打一句"全部完成" —— 用户会以为产物齐全。
+        失败数**包含下载阶段失败的条目**（以前只统计转写/总结失败）。
         """
         logger.info("[播放列表模式]")
-        results: List[Tuple[Path, Dict[str, Any]]] = self.downloader.download_playlist(url)
+        playlist = self.downloader.download_playlist(url)
 
-        failed = 0
-        for video_path, meta in results:
+        failed = playlist.failed          # 下载阶段就失败的条目
+        for video_path, meta in playlist.items:
             self._check_cancel()
             logger.info("--- %s ---", meta.get('title', video_path.stem))
             try:
@@ -602,12 +606,13 @@ class Pipeline:
                 logger.error("[FAIL] %s", e)
                 continue
 
-        if results:
-            group_dir: Path = results[0][0].parent.parent
-            self._collect_outputs(group_dir)
+        # 汇总目录由下载器显式给出：以前用 results[0][0].parent.parent 猜，
+        # 在"原生多集下载"分支下会猜成 output 根目录，把历史任务也汇进来。
+        if playlist.items:
+            self._collect_outputs(playlist.folder)
 
         self.last_failures = failed
-        self._log_batch_result(failed, len(results))
+        self._log_batch_result(failed, len(playlist.items) + playlist.failed)
         return self.output_root
 
     def process_folder(self, folder_path: str) -> None:
@@ -662,6 +667,26 @@ class Pipeline:
         else:
             logger.info("全部完成! 输出目录: %s", self.output_root)
 
+    @staticmethod
+    def _iter_output_files(group_dir: Path):
+        """遍历 group_dir 下待汇总的产物文件，兼容两种布局：
+
+        - 文件夹模式 / 逐条下载播放列表：group_dir/<每个视频的子目录>/xxx.md
+        - yt-dlp 原生多集下载：        group_dir/xxx.md（视频平铺，没有子目录）
+
+        以前只扫子目录，原生多集分支一个文件都收不到。
+        """
+        skip = ("转写汇总", "总结汇总")
+        for entry in sorted(group_dir.iterdir()):
+            if entry.is_dir():
+                if entry.name in skip:
+                    continue
+                for f in sorted(entry.iterdir()):
+                    if f.is_file():
+                        yield f
+            elif entry.is_file():
+                yield entry
+
     def _collect_outputs(self, group_dir: Path) -> None:
         """将批量处理的所有转写和总结分别收集到汇总文件夹"""
         import shutil
@@ -676,21 +701,17 @@ class Pipeline:
         summary_dir.mkdir(parents=True, exist_ok=True)
 
         count_t, count_s = 0, 0
-        for subdir in sorted(group_dir.iterdir()):
-            if not subdir.is_dir():
+        seen: set = set()
+        for file in self._iter_output_files(group_dir):
+            if file.suffix not in exts or file.name in seen:
                 continue
-            if subdir.name in ("转写汇总", "总结汇总"):
-                continue
-
-            for file in sorted(subdir.iterdir()):
-                if not file.is_file() or file.suffix not in exts:
-                    continue
-                if file.stem.startswith(prefixes):
-                    shutil.copy2(file, summary_dir / file.name)
-                    count_s += 1
-                else:
-                    shutil.copy2(file, transcript_dir / file.name)
-                    count_t += 1
+            seen.add(file.name)
+            if file.stem.startswith(prefixes):
+                shutil.copy2(file, summary_dir / file.name)
+                count_s += 1
+            else:
+                shutil.copy2(file, transcript_dir / file.name)
+                count_t += 1
 
         if count_t > 0:
             logger.info("转写汇总: %d 个文件 → %s", count_t, transcript_dir)

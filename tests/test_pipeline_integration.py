@@ -328,3 +328,96 @@ class TestBatchFailureCount:
         monkeypatch.setattr(p, "_collect_outputs", lambda *a, **k: None)
         p.process_folder(str(src))
         assert p.last_failures == 0
+
+
+class TestPlaylistFailureReporting:
+    """回归：播放列表里某一集**下载失败**时，以前不计入失败数，
+    界面仍显示"全部完成"；汇总目录也用 `parent.parent` 猜，原生多集
+    下载分支会猜成 output 根目录，把历史任务也汇进来。"""
+
+    @staticmethod
+    def _fake_playlist(tmp_path, ok=("ep1",), failed=2):
+        from downloader import PlaylistResult
+        playlist_dir = tmp_path / "播放列表"
+        items = []
+        for stem in ok:
+            folder = playlist_dir / stem
+            folder.mkdir(parents=True, exist_ok=True)
+            video = folder / f"{stem}.mp4"
+            video.write_bytes(b"fake")
+            items.append((video, {"title": stem}))
+        return PlaylistResult(items, failed, playlist_dir), playlist_dir
+
+    def test_download_failures_are_counted(self, tmp_path, monkeypatch):
+        p = make_pipeline(tmp_path)
+        res, playlist_dir = self._fake_playlist(tmp_path, ok=("ep1",), failed=2)
+        p.downloader = type("D", (), {"download_playlist": lambda self, url: res})()
+        monkeypatch.setattr(p, "_process_one", lambda v, m: None)
+        monkeypatch.setattr(p, "_collect_outputs", lambda d: None)
+
+        p._process_playlist("http://x")
+
+        assert p.last_failures == 2, (
+            f"下载阶段失败的 2 集应计入失败数，实际 {p.last_failures}")
+
+    def test_download_and_process_failures_add_up(self, tmp_path, monkeypatch):
+        p = make_pipeline(tmp_path)
+        res, _ = self._fake_playlist(tmp_path, ok=("ep1", "ep2"), failed=1)
+        p.downloader = type("D", (), {"download_playlist": lambda self, url: res})()
+
+        def fake_process_one(video_path, meta):
+            if video_path.stem == "ep2":
+                raise RuntimeError("模拟转写失败")
+
+        monkeypatch.setattr(p, "_process_one", fake_process_one)
+        monkeypatch.setattr(p, "_collect_outputs", lambda d: None)
+
+        p._process_playlist("http://x")
+        assert p.last_failures == 2, "1 个下载失败 + 1 个转写失败 = 2"
+
+    def test_collect_uses_folder_from_downloader(self, tmp_path, monkeypatch):
+        """汇总目录必须来自 downloader，不能靠 parent.parent 猜"""
+        p = make_pipeline(tmp_path)
+        res, playlist_dir = self._fake_playlist(tmp_path, ok=("ep1",), failed=0)
+        p.downloader = type("D", (), {"download_playlist": lambda self, url: res})()
+        monkeypatch.setattr(p, "_process_one", lambda v, m: None)
+        collected = {}
+        monkeypatch.setattr(p, "_collect_outputs",
+                            lambda d: collected.setdefault("dir", d))
+
+        p._process_playlist("http://x")
+        assert collected["dir"] == playlist_dir
+
+
+class TestCollectOutputsLayouts:
+    """_collect_outputs 要同时支持两种布局：
+    逐条下载/文件夹模式（每个视频一个子目录）与原生多集下载（文件平铺）。"""
+
+    def _prepare(self, tmp_path, flat: bool):
+        p = make_pipeline(tmp_path, formats=("md",))
+        group = tmp_path / "组"
+        group.mkdir(parents=True, exist_ok=True)
+        target = group if flat else group / "ep1"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "ep1.md").write_text("转写", encoding="utf-8")
+        (target / "全面总结-ep1.md").write_text("总结", encoding="utf-8")
+        (target / "ep1.mp4").write_bytes(b"video")     # 视频不该被汇总
+        return p, group
+
+    def test_nested_layout(self, tmp_path):
+        p, group = self._prepare(tmp_path, flat=False)
+        p._collect_outputs(group)
+        assert (group / "转写汇总" / "ep1.md").exists()
+        assert (group / "总结汇总" / "全面总结-ep1.md").exists()
+
+    def test_flat_layout(self, tmp_path):
+        """原生多集下载时文件平铺，以前一个都收不到"""
+        p, group = self._prepare(tmp_path, flat=True)
+        p._collect_outputs(group)
+        assert (group / "转写汇总" / "ep1.md").exists(), "平铺布局的转写也应被汇总"
+        assert (group / "总结汇总" / "全面总结-ep1.md").exists()
+
+    def test_video_files_not_collected(self, tmp_path):
+        p, group = self._prepare(tmp_path, flat=True)
+        p._collect_outputs(group)
+        assert not (group / "转写汇总" / "ep1.mp4").exists()

@@ -10,7 +10,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from format_selection import candidates_from_meta, format_candidates, quality_to_format
 from utils import (sanitize_filename, set_state, is_done, python_module_cmd,
@@ -76,6 +76,23 @@ class _SlowDownload(RuntimeError):
 
 class _Aborted(Exception):
     """主线程要求中止本次 yt-dlp 下载（由 progress_hook 抛出，让 yt-dlp 自己退出）"""
+
+
+class PlaylistResult(NamedTuple):
+    """播放列表下载结果。
+
+    以前只返回 `[(video_path, meta), ...]`，导致两个问题：
+      1. 单集下载失败被吞掉（只打 [SKIP]），调用方统计不到失败数，
+         界面仍显示"全部完成"；
+      2. 调用方只能靠 `results[0][0].parent.parent` 猜汇总目录 —— 在
+         "yt-dlp 原生多集下载"分支下会猜到 output 根目录，把历史任务
+         也汇进"转写汇总/总结汇总"。
+    现在把失败数与目录一起显式返回。
+    """
+
+    items: List[Tuple[Path, Dict[str, Any]]]   # 成功下载的 (视频路径, 元信息)
+    failed: int                                 # 下载失败的条目数
+    folder: Path                                # 播放列表所在目录（汇总用）
 
 
 class Downloader:
@@ -594,8 +611,12 @@ class Downloader:
         set_state(folder, "downloaded")
         return dest, {"title": title, "uploader": "本地文件"}
 
-    def download_playlist(self, url: str) -> List[Tuple[Path, Dict[str, Any]]]:
-        """下载播放列表所有视频，返回 [(video_path, meta), ...]"""
+    def download_playlist(self, url: str) -> PlaylistResult:
+        """下载播放列表所有视频。
+
+        返回 `PlaylistResult`：成功条目、**失败条目数**、播放列表目录。
+        失败数必须显式返回，否则调用方无法区分"全部成功"和"部分失败"。
+        """
         if not self._is_url(url):
             url = self._extract_url(url) or url
         url = self._normalize_url(url)
@@ -626,14 +647,20 @@ class Downloader:
             except Exception as e:
                 logger.warning("原生多集下载失败: %s，回退为单视频下载", e)
                 video_path, video_meta = self.download(url, output_subdir=playlist_title)
-                return [(video_path, video_meta)]
+                # 单视频回退：视频在 output/播放列表名/<标题>/ 下，
+                # 汇总目录是再上一层（与逐条下载分支保持一致）
+                return PlaylistResult([(video_path, video_meta)], 0,
+                                      video_path.parent.parent)
 
         logger.info("共 %d 个视频", len(entries))
         results: List[Tuple[Path, Dict[str, Any]]] = []
+        failed = 0
         for i, entry in enumerate(entries):
             video_url: Optional[str] = entry.get("url") or entry.get("webpage_url")
             if not video_url:
-                logger.warning("[SKIP] 无法获取视频 URL: %s", entry.get('title', entry.get('id', 'unknown')))
+                failed += 1
+                logger.warning("[SKIP] 无法获取视频 URL: %s",
+                               entry.get('title', entry.get('id', 'unknown')))
                 continue
             logger.info("[%d/%d]", i + 1, len(entries))
             try:
@@ -642,12 +669,14 @@ class Downloader:
             except Exception as e:
                 if isinstance(e, (KeyboardInterrupt, SystemExit)):
                     raise
+                failed += 1
                 logger.warning("[SKIP] 下载失败: %s", e)
                 continue
 
-        return results
+        return PlaylistResult(results, failed, self.output_root / playlist_title)
 
-    def _download_playlist_direct(self, url: str, playlist_title: str) -> List[Tuple[Path, Dict[str, Any]]]:
+    def _download_playlist_direct(self, url: str,
+                                  playlist_title: str) -> PlaylistResult:
         """yt-dlp 原生播放列表下载"""
         folder: Path = self.output_root / playlist_title
         folder.mkdir(parents=True, exist_ok=True)
@@ -669,7 +698,9 @@ class Downloader:
             for f in sorted(folder.glob(f"*{ext}")):
                 results.append((f, {"title": f.stem}))
         results.sort(key=lambda item: item[0].name)
-        return results
+        # 原生多集下载：视频**平铺**在播放列表目录下（没有每集子目录），
+        # 所以汇总是这个目录本身，而不是它的父目录。
+        return PlaylistResult(results, 0, folder)
 
     # ------------------------------------------------------------------
     # 元信息

@@ -234,3 +234,68 @@ class TestFormatSelection:
         cand = candidates_from_meta("best", many)
         # 上限 + 末尾兜底
         assert len(cand) <= MAX_FORMAT_CANDIDATES + 1
+
+
+class TestPlaylistResult:
+    """回归：单集下载失败以前只打 [SKIP]、不计入失败数，
+    调用方无法区分"全部成功"和"部分失败"。"""
+
+    def test_counts_skipped_entries(self, tmp_path, monkeypatch):
+        import json as _json
+        import downloader as dl_mod
+        from downloader import Downloader, PlaylistResult
+
+        d = Downloader({"downloader": {}}, tmp_path)
+        monkeypatch.setattr(d, "_fetch_meta", lambda url: {"title": "PL"})
+
+        entries = [{"url": "u1"}, {"url": "u2"}, {"title": "没有 url 的条目"}]
+
+        class _FakeRun:
+            stdout = "\n".join(_json.dumps(e, ensure_ascii=False) for e in entries)
+
+        monkeypatch.setattr(dl_mod.subprocess, "run",
+                            lambda *a, **k: _FakeRun())
+
+        def fake_download(url, output_subdir=None):
+            if url == "u2":
+                raise RuntimeError("模拟下载失败")
+            folder = tmp_path / "PL" / url
+            folder.mkdir(parents=True, exist_ok=True)
+            f = folder / f"{url}.mp4"
+            f.write_bytes(b"x")
+            return f, {"title": url}
+
+        monkeypatch.setattr(d, "download", fake_download)
+
+        res = d.download_playlist("http://example.com/playlist")
+
+        assert isinstance(res, PlaylistResult)
+        assert len(res.items) == 1, "只有 u1 成功"
+        assert res.failed == 2, "u2 下载失败 + 无 url 条目 = 2 个失败"
+        assert res.folder == tmp_path / "PL", "汇总目录应是播放列表目录"
+
+    def test_direct_download_returns_own_folder(self, tmp_path, monkeypatch):
+        """原生多集下载的视频平铺在播放列表目录下，汇总目录就是它自己"""
+        import downloader as dl_mod
+        from downloader import Downloader, PlaylistResult
+
+        d = Downloader({"downloader": {}}, tmp_path)
+        monkeypatch.setattr(d, "_fetch_meta", lambda url: {"title": "PL"})
+
+        class _Empty:
+            stdout = ""
+
+        monkeypatch.setattr(dl_mod.subprocess, "run", lambda *a, **k: _Empty())
+
+        def fake_direct(url, title):
+            folder = tmp_path / title
+            folder.mkdir(parents=True, exist_ok=True)
+            f = folder / "ep1.mp4"
+            f.write_bytes(b"x")
+            return PlaylistResult([(f, {"title": "ep1"})], 0, folder)
+
+        monkeypatch.setattr(d, "_download_playlist_direct", fake_direct)
+
+        res = d.download_playlist("http://example.com/playlist")
+        assert res.folder == tmp_path / "PL"
+        assert res.failed == 0
