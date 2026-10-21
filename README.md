@@ -277,8 +277,29 @@ output/
 
 ## 常见问题
 
+**Q: 点「打开输出目录」报「Windows 无法访问指定设备、路径或文件」？**
+A: 大概率是 `venv\Scripts\python.exe` 被设置了**低完整性标签**。Windows 会据此把
+从它启动的进程整体降权，而低完整性进程会被拒绝一切 shell 操作。
+
+判断方法：看程序启动时的日志第一行：
+
+```
+[环境] 会话=1  完整性级别=Low   ← 正常应为 Medium
+```
+
+修复：双击项目目录下的 **`修复完整性级别.ps1`**（或右键 →「使用 PowerShell 运行」），
+它会执行：
+
+```
+icacls "<项目目录>\venv\Scripts" /setintegritylevel (OI)(CI)M /T
+icacls "<项目目录>" /setintegritylevel (OI)(CI)M
+```
+
+修完**重启本程序**，日志里应变为 `完整性级别=Medium`。
+
 **Q: 启动 GUI 无反应？**
-A: 确保已运行 `python setup.py` 完成初始化。用命令行 `python gui.py` 启动可看到错误信息。
+A: 确保已运行 `python setup.py` 完成初始化。用命令行 `python gui.py` 启动可看到错误信息；
+或双击 `启动（调试）.bat`，它会保留控制台并显示完整报错。
 
 **Q: GPU 不可用？**
 A: 自动回退到 CPU。运行 `python main.py --check` 诊断。确保 NVIDIA 驱动已安装。

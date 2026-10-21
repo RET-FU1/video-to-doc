@@ -243,10 +243,18 @@ class App:
         self._log(f"[环境] 工作目录: {os.getcwd()}")
 
         if level_rid is not None and level_rid < 0x2000:
-            self._log("[警告] 本进程完整性级别低于 Medium —— 系统会拒绝它的一切 shell 操作"
-                      "（打开目录、启动外部程序都会失败），这不是本项目能修复的。")
-            self._log("[警告] 说明本程序是被某个受限环境/沙箱以降权方式启动的。"
-                      "请改为在资源管理器里双击「视频转文档.lnk」启动（正常应为 Medium）。")
+            # 真实踩过的坑：venv 里的 python.exe 被打了 Low 完整性标签后，
+            # 从它启动的进程永远是 Low，而 Low 进程会被 Windows 拒绝一切
+            # shell 操作（打开目录报"无法访问指定设备、路径或文件"、
+            # explorer.exe 启动即 0xc0000142）。
+            self._log("[警告] 本进程完整性级别低于 Medium —— Windows 会拒绝它的"
+                      "一切 shell 操作：打开目录、启动外部程序都会失败。")
+            self._log("[警告] 这通常是因为 venv\\Scripts\\python.exe 被设置了"
+                      "低完整性标签。修复方法（在项目目录运行一次）：")
+            self._log(f'    icacls "{PROJECT_ROOT}\\venv\\Scripts" '
+                      f'/setintegritylevel (OI)(CI)M /T')
+            self._log(f'    icacls "{PROJECT_ROOT}" /setintegritylevel (OI)(CI)M')
+            self._log("    或直接双击项目目录下的「修复完整性级别.ps1」。修完需重启本程序。")
 
     def _report_callback_exception(self, exc_type, exc_value, exc_tb) -> None:
         """把 Tk 回调里的未捕获异常显示到日志区（而不是丢进隐藏的 stderr）"""
