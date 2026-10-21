@@ -23,6 +23,7 @@ if _VENV_PYTHON.exists() and Path(sys.executable).resolve().parent != _VENV_DIR.
 import logging
 import os
 import queue
+import re
 import subprocess
 import threading
 from contextlib import contextmanager
@@ -190,6 +191,62 @@ class App:
         # 默认只会打印到 stderr（看不见），表现为"点了按钮没反应"。
         # 接管后一律写进日志窗口，任何静默失败都能被看到。
         self.root.report_callback_exception = self._report_callback_exception
+        # 启动时打印自身运行环境：定位"打开目录被系统拒绝"这类问题时，
+        # 进程的完整性级别/会话/是否提权是最关键的线索（低完整性级别会
+        # 被系统拒绝一切 shell 调用，而用户完全看不出来）。
+        self._log_env_info()
+
+    def _log_env_info(self) -> None:
+        """把本进程的运行环境写进日志（用于诊断"系统拒绝"类问题）
+
+        完整性级别是最关键的线索：低于 Medium 的进程会被系统拒绝一切
+        shell 操作（打开目录、启动外部程序全部失败），而用户完全看不出来。
+        读取方式走 `whoami /groups` 里的 SID（语言无关），比手写
+        GetTokenInformation 的结构体解析可靠得多 —— 后者我写错过一次，
+        把 Medium 误报成 Untrusted。
+        """
+        import ctypes
+
+        try:
+            sid = ctypes.c_ulong()
+            ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(sid))
+            session = sid.value
+        except Exception:      # noqa: BLE001
+            session = -1
+
+        level_rid = None
+        try:
+            out = subprocess.run(["whoami", "/groups"], capture_output=True,
+                                 timeout=15,
+                                 encoding="mbcs", errors="replace").stdout or ""
+            # 完整性标签的 SID 固定是 S-1-16-<RID>，与系统语言无关
+            m = re.search(r"S-1-16-(\d+)", out)
+            if m:
+                level_rid = int(m.group(1))
+        except Exception:      # noqa: BLE001
+            level_rid = None
+
+        names = {0: "Untrusted", 0x1000: "Low", 0x2000: "Medium",
+                 0x3000: "High", 0x4000: "System"}
+        if level_rid is None:
+            level_name = "未知（读取失败）"
+        else:
+            level_name = names.get(level_rid, f"未知(0x{level_rid:x})")
+
+        try:
+            is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:      # noqa: BLE001
+            is_admin = False
+
+        self._log(f"[环境] Python: {sys.executable}")
+        self._log(f"[环境] 会话={session}  完整性级别={level_name}  管理员={is_admin}")
+        self._log(f"[环境] 工作目录: {os.getcwd()}")
+
+        if level_rid is not None and level_rid < 0x2000:
+            self._log("[警告] 本进程完整性级别低于 Medium —— 系统会拒绝它的一切 shell 操作"
+                      "（打开目录、启动外部程序都会失败），这不是本项目能修复的。")
+            self._log("[警告] 说明本程序是被某个受限环境/沙箱以降权方式启动的。"
+                      "请改为在资源管理器里双击「视频转文档.lnk」启动（正常应为 Medium）。")
 
     def _report_callback_exception(self, exc_type, exc_value, exc_tb) -> None:
         """把 Tk 回调里的未捕获异常显示到日志区（而不是丢进隐藏的 stderr）"""
@@ -847,13 +904,17 @@ class App:
         if only_this:
             self._log("    → 其他目录可正常打开，说明是该输出目录本身的权限/属性问题")
         else:
-            self._log("    → 所有目录都无法用系统方式打开。这通常**不是权限配置问题**，")
-            self._log("      而是安全软件（腾讯电脑管家 / 360 / 火绒 / Defender）")
-            self._log("      按「程序信誉」拦截了 python.exe 的 shell 调用。")
-            self._log("      修复方法：把下面两项加入安全软件的「信任区 / 白名单 / 排除项」，")
+            self._log("    → 本程序进程内所有目录都打不开（错误码 5 = 拒绝访问）。")
+            self._log("      注意：这只说明**本进程**被拒绝，不代表系统坏了。请先做两个对照测试：")
+            self._log("      A) 按 Win+R，输入下面这个路径回车 —— 能打开吗？")
+            self._log(f"         {output_dir}")
+            self._log("      B) 打开 PowerShell，粘贴并回车：")
+            self._log(f'         Start-Process "{output_dir}"')
+            self._log("      若 A/B 能打开、只有本程序不行 → 是本进程被策略/安全软件针对；")
+            self._log("      若 A/B 也打不开 → 是该目录或 shell 本身的问题。")
+            self._log("      本进程的可执行文件与项目目录（加白名单时用）：")
             self._log(f"         1) {sys.executable}")
             self._log(f"         2) {PROJECT_ROOT}")
-            self._log("      然后**重启本程序**再试（改配置后需要重启进程才生效）。")
 
         self._set_status("已打开目录列表")
         self._show_folder_window(output_dir, note=reason)
