@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from format_selection import candidates_from_meta, format_candidates, quality_to_format
 from utils import (sanitize_filename, set_state, is_done, python_module_cmd,
                    VIDEO_EXTS, AUDIO_EXTS, MEDIA_EXTS, CancelToken, CancelledError,
                    fmt_size)
@@ -26,8 +27,6 @@ _WATCHDOG_POLL = 0.25
 # 叫停工作线程后最多等多久（秒）。若线程卡死在 socket 读上、根本没有进度
 # 回调可触发，就不再无谓死等，直接弃用本次尝试、换下一个候选。
 _ABORT_JOIN_TIMEOUT = 3.0
-# 最多生成多少个 format 候选（避免在同一个视频上无限换格式重试）
-MAX_FORMAT_CANDIDATES = 5
 # 有多个候选时，每个候选只给少量重试：卡在坏 CDN 上重试 30 次要 9 分钟（实测），
 # 而换下一个候选通常 10 秒就能下完，所以优先"快速换路"
 PER_CANDIDATE_RETRIES = 2
@@ -159,115 +158,22 @@ class Downloader:
 
     @staticmethod
     def _quality_to_format(quality: str) -> str:
-        """将清晰度预设映射为 yt-dlp format 字符串
-
-        历史背景：早期 B站 把 AV1 流分发到不稳定的第三方 CDN（mountaintoys.cn），
-        所以这里曾强制选 AVC。但实测（2026-10）B站 把 **1080p AVC 流**分到了
-        mountaintoys，而 AV1/HEVC 反而在正常 CDN 上 —— 强制 AVC 恰好选中了
-        坏节点，下载 37 秒后 `ConnectionResetError 10054` 且重试无效。
-
-        现在改为按「可用性优先」的降级链：
-          1. 优先 AVC（兼容性最好，剪辑/播放最稳）
-          2. 失败则退回任意编码（AV1/HEVC 通常在其他 CDN 上，能下）
-        yt-dlp 会在主格式不可用时按 `/` 逐级降级，正好符合这个需求。
-        """
-        mapping = {
-            # best：优先 AVC，失败退回任意可用流
-            "best":   "bestvideo[vcodec^=avc]+bestaudio/bestvideo+bestaudio/best",
-            "2160p":  "bestvideo[height<=2160][vcodec^=avc]+bestaudio/bestvideo[height<=2160]+bestaudio/best",
-            "1080p":  "bestvideo[height<=1080][vcodec^=avc]+bestaudio/bestvideo[height<=1080]+bestaudio/best",
-            "720p":   "bestvideo[height<=720][vcodec^=avc]+bestaudio/bestvideo[height<=720]+bestaudio/best",
-            "480p":   "bestvideo[height<=480][vcodec^=avc]+bestaudio/bestvideo[height<=480]+bestaudio/best",
-            "360p":   "bestvideo[height<=360][vcodec^=avc]+bestaudio/bestvideo[height<=360]+bestaudio/best",
-            "audio":  "bestaudio/best",
-        }
-        return mapping.get(quality, mapping["1080p"])
+        """把清晰度预设翻译成 yt-dlp format 表达式（实现见 format_selection）"""
+        return quality_to_format(quality)
 
     def _format_candidates(self, quality: str) -> List[str]:
-        """返回 format 候选列表，每个元素是完整的 format 表达式。
-
-        yt-dlp 的 `a/b/c` 只在"格式不可用"时降级，**不会**在"下载出错"时降级。
-        所以下载失败时必须由我们自己换下一个候选重试 —— 这是本次
-        `mountaintoys.cn` 事故的直接原因：AVC 1080p 在坏 CDN 上，
-        但 yt-dlp 认为它"可用"，于是一直在这个节点上重试到失败。
-        """
-        fmt_cfg: str = (self.dl_config.get("format") or "").strip()
-        if fmt_cfg:
-            # 用户自定义 format：按其 `/` 分段也生成候选
-            parts = [p.strip() for p in fmt_cfg.split("/") if p.strip()]
-            if parts:
-                return parts
-            return [fmt_cfg]
-
-        # 依赖元信息里的实际可用流，按"编码兼容性 + 画质"排序挑选
-        return self._candidates_from_meta(quality)
+        """返回 format 候选列表（实现见 format_selection.format_candidates）"""
+        return format_candidates(
+            quality,
+            format_cfg=(self.dl_config.get("format") or ""),
+            meta=self._current_meta,
+        )
 
     def _candidates_from_meta(self, quality: str) -> List[str]:
-        """从当前视频的真实格式列表里，按可用性挑出若干候选 format_id 组合。
+        """从当前视频的真实格式列表挑候选（实现见 format_selection）"""
+        return candidates_from_meta(quality, self._current_meta or {})
 
-        这样能避开"某个 CDN 节点连不上"的坑：同一个视频的 1080p 往往同时有
-        AVC / HEVC / AV1 三个流，分别在不同 CDN 上，换一个就能下。
-        """
-        info = self._current_meta or {}
-        formats = info.get("formats") or []
-        if not formats:
-            # 没有元信息（如已在下载中途调用）：退回静态映射
-            return [p.strip() for p in self._quality_to_format(quality).split("/") if p.strip()]
 
-        height_cap = None
-        if quality not in ("best", "audio"):
-            digits = "".join(ch for ch in quality if ch.isdigit())
-            height_cap = int(digits) if digits else None
-
-        def _size(f: Dict[str, Any]) -> float:
-            return float(f.get("filesize") or f.get("filesize_approx") or 0)
-
-        videos = [f for f in formats if f.get("vcodec") not in (None, "none") and f.get("url")]
-        audios = [f for f in formats if f.get("acodec") not in (None, "none")
-                  and f.get("vcodec") in (None, "none") and f.get("url")]
-
-        if quality == "audio":
-            audios.sort(key=_size, reverse=True)
-            return [a["format_id"] for a in audios] or ["bestaudio/best"]
-
-        if height_cap:
-            videos = [f for f in videos if (f.get("height") or 0) <= height_cap]
-
-        # 编码优先级：AVC 兼容性最好，其次 HEVC，最后 AV1
-        def _codec_rank(f: Dict[str, Any]) -> int:
-            v = (f.get("vcodec") or "").lower()
-            if v.startswith("avc"):
-                return 0
-            if v.startswith(("hev", "hvc")):
-                return 1
-            if v.startswith("av01"):
-                return 2
-            return 3
-
-        # 排序：先按画质从高到低，同画质内按编码兼容性（AVC > HEVC > AV1）。
-        # 这样 1080p AVC 失败时会先试 1080p HEVC/AV1（换个 CDN 但保持画质），
-        # 而不是直接掉到 720p。
-        videos.sort(key=lambda f: (-(f.get("height") or 0), _codec_rank(f), -_size(f)))
-
-        best_audio = None
-        if audios:
-            audios.sort(key=_size, reverse=True)
-            best_audio = audios[0]["format_id"]
-
-        candidates: List[str] = []
-        seen = set()
-        for v in videos:
-            fid = v.get("format_id")
-            if fid in seen:
-                continue
-            seen.add(fid)
-            audio = best_audio or "bestaudio"
-            candidates.append(f"{fid}+{audio}")
-            if len(candidates) >= MAX_FORMAT_CANDIDATES:
-                break
-
-        candidates.append("bestvideo+bestaudio/best")
-        return candidates
 
     def _progress_hook(self, d: Dict[str, Any]) -> None:
         """yt-dlp 下载进度回调（纯记录，**不**判断中止）

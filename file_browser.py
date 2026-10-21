@@ -108,6 +108,10 @@ class FolderBrowser(tk.Toplevel):
                   background=[("selected", C["accent_soft"])],
                   foreground=[("selected", C["accent"])])
         style.map("Folder.Treeview.Heading", background=[("active", C["hover"])])
+        # 去掉 Treeview 自带的凹陷边框，才能和扁平卡片风格一致
+        style.layout("Folder.Treeview", [
+            ("Folder.Treeview.treearea", {"sticky": "nswe"})
+        ])
 
         self._tree = ttk.Treeview(wrap, columns=("size", "mtime"),
                                   show="tree headings", selectmode="browse",

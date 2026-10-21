@@ -111,3 +111,23 @@ class TestThresholds:
         pipeline = __import__("pipeline")
         assert pipeline.POLISH is POLISH
         assert pipeline.verify is fidelity.verify
+
+class TestSuccessPathCleanup:
+    """回归：模型忘记去掉 [MM:SS] 时，通过校验的输出仍要剥离时间戳。
+
+    重构（9522be2）一度丢掉了这个行为 —— 时间戳会原样混进转写正文，
+    而这正是本项目最初要修的"错漏"之一。
+    """
+
+    def test_residual_timestamp_stripped(self):
+        src = "这是第一句话" * 20
+        out = "[00:05] " + src
+        result = verify(src, out)
+        assert not result.startswith("[00:05]"), "通过校验后仍应剥离残留时间戳"
+        assert result == src
+
+    def test_speaker_label_preserved(self):
+        """剥离时间戳不能顺手把合法的说话人标签也吃掉"""
+        src = "今天天气不错" * 20
+        out = "说话人A：" + src
+        assert verify(src, out).startswith("说话人A：")

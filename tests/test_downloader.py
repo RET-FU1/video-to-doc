@@ -169,3 +169,68 @@ class TestUrlDetection:
             pass
         assert called["import"] == 0, "裸域名不应走本地文件导入"
         assert called["meta"] == "https://bilibili.com/video/BV1NvJ66gEMn/?trackid=abc"
+
+class TestFormatSelection:
+    """format_selection 是纯函数，单测覆盖候选链的排序与兜底逻辑"""
+
+    META = {"formats": [
+        # 1080p：AVC / HEVC / AV1 三条流（模拟 B站）
+        {"format_id": "30080", "vcodec": "avc1.640033", "acodec": "none",
+         "height": 1080, "url": "u8", "filesize": 160 * 1024 * 1024},
+        {"format_id": "30077", "vcodec": "hvc1.1.6.L15", "acodec": "none",
+         "height": 1080, "url": "u7", "filesize": 74 * 1024 * 1024},
+        {"format_id": "100026", "vcodec": "av01.0.08M.0", "acodec": "none",
+         "height": 1080, "url": "u26", "filesize": 64 * 1024 * 1024},
+        # 720p
+        {"format_id": "30064", "vcodec": "avc1.640033", "acodec": "none",
+         "height": 720, "url": "u64", "filesize": 72 * 1024 * 1024},
+        # 音频
+        {"format_id": "30280", "vcodec": "none", "acodec": "mp4a.40.2",
+         "url": "ua", "filesize": 7 * 1024 * 1024},
+    ]}
+
+    def test_best_order_keeps_quality_then_codec(self):
+        from format_selection import candidates_from_meta
+        cand = candidates_from_meta("best", self.META)
+        # 1080p 三种编码应排在 720p 之前
+        assert cand[0] == "30080+30280", "首选应为 1080p AVC"
+        assert cand[1] == "30077+30280", "其次 1080p HEVC（换 CDN 但保持画质）"
+        assert cand[2] == "100026+30280", "再次 1080p AV1"
+        assert cand[3].startswith("30064"), "画质降级应排在这些之后"
+
+    def test_fallback_chain_tail(self):
+        from format_selection import candidates_from_meta
+        cand = candidates_from_meta("best", self.META)
+        assert cand[-1] == "bestvideo+bestaudio/best", "末尾应有兜底表达式"
+
+    def test_height_cap(self):
+        from format_selection import candidates_from_meta
+        cand = candidates_from_meta("720p", self.META)
+        assert all(not c.startswith(("30080", "30077", "100026")) for c in cand), \
+            "720p 预设不应包含 1080p 流"
+
+    def test_audio_only(self):
+        from format_selection import candidates_from_meta
+        cand = candidates_from_meta("audio", self.META)
+        assert cand == ["30280"]
+
+    def test_user_format_override_splits(self):
+        from format_selection import format_candidates
+        cand = format_candidates("best", format_cfg="30080+30280/30077+30280")
+        assert cand == ["30080+30280", "30077+30280"]
+
+    def test_no_meta_falls_back_to_static(self):
+        from format_selection import format_candidates, quality_to_format
+        cand = format_candidates("1080p", meta={})
+        assert cand == [p.strip() for p in quality_to_format("1080p").split("/") if p.strip()]
+
+    def test_candidate_cap(self):
+        from format_selection import MAX_FORMAT_CANDIDATES, candidates_from_meta
+        many = {"formats": [
+            {"format_id": f"v{i}", "vcodec": "avc1", "acodec": "none",
+             "height": 1080 - i, "url": "u", "filesize": 1}
+            for i in range(20)
+        ] + [{"format_id": "a", "vcodec": "none", "acodec": "mp4a", "url": "u", "filesize": 1}]}
+        cand = candidates_from_meta("best", many)
+        # 上限 + 末尾兜底
+        assert len(cand) <= MAX_FORMAT_CANDIDATES + 1

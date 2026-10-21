@@ -179,5 +179,9 @@ def verify(src: str, out: str, label: str = "抛光",
         )
         return fallback_text(src)
 
-    # 通过：原样返回模型输出（不做任何"修正"，避免吃掉合法标注）
+    # 通过：原样返回模型输出（保留它合法新增的「说话人A：」标签），
+    # 但兜掉模型偶尔忘记去掉的行首 [MM:SS] 时间戳 —— 否则时间戳会混进正文。
+    if TIME_PREFIX_RE.search(raw_out):
+        logger.debug("%s：模型输出残留时间戳，已剥离", label)
+        return strip_time_prefix(raw_out)
     return raw_out
